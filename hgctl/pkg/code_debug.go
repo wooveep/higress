@@ -107,9 +107,9 @@ func getStartCodeDebugCmd() *cobra.Command {
 			}
 
 			// update the xds address in higress-config ConfigMap
-			// and trigger rollout for higress-controller and higress-gateway deployments
+			// and trigger rollout for higress-controller and aigateway-gateway deployments
 			fmt.Fprintf(writer, "Updating xds address in higress-config ConfigMap "+
-				"and triggering rollout for higress-controller and higress-gateway deployments...\n")
+				"and triggering rollout for higress-controller and aigateway-gateway deployments...\n")
 			err = updateXdsIpAndRollout(clientSet, ip, DefaultPort)
 			if err != nil {
 				fmt.Fprintf(writer, "fail to update xds address in higress-config ConfigMap: %v", err)
@@ -179,9 +179,9 @@ func getStopCodeDebugCmd() *cobra.Command {
 			}
 
 			// recover the xds address in higress-config ConfigMap
-			// and trigger rollout for higress-controller and higress-gateway deployments
+			// and trigger rollout for higress-controller and aigateway-gateway deployments
 			fmt.Fprintf(writer, "Recovering xds address in higress-config ConfigMap "+
-				"and triggering rollout for higress-controller and higress-gateway deployments...\n")
+				"and triggering rollout for higress-controller and aigateway-gateway deployments...\n")
 			err = updateXdsIpAndRollout(clientSet, DefaultIp, DefaultPort)
 			if err != nil {
 				fmt.Fprintf(writer, "fail to recover xds address in higress-config ConfigMap: %v", err)
@@ -235,14 +235,14 @@ func getNonLoopbackIPv4() (string, error) {
 }
 
 // updateXdsIpAndRollout updates the xds address in higress-config ConfigMap
-// and triggers rollout for higress-controller and higress-gateway deployments
+// and triggers rollout for higress-controller and aigateway-gateway deployments
 // also can recover the xds address in higress-config ConfigMap
 func updateXdsIpAndRollout(c *kubernetes.Clientset, ip string, port string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	// Get higress-config ConfigMap
-	cm, err := c.CoreV1().ConfigMaps("higress-system").Get(ctx, "higress-config", metav1.GetOptions{})
+	cm, err := c.CoreV1().ConfigMaps("aigateway-system").Get(ctx, "higress-config", metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
@@ -259,7 +259,7 @@ func updateXdsIpAndRollout(c *kubernetes.Clientset, ip string, port string) erro
 	cm.Data["mesh"] = newMesh
 
 	// Update higress-config ConfigMap
-	_, err = c.CoreV1().ConfigMaps("higress-system").Update(ctx, cm, metav1.UpdateOptions{})
+	_, err = c.CoreV1().ConfigMaps("aigateway-system").Update(ctx, cm, metav1.UpdateOptions{})
 	if err != nil {
 		return err
 	}
@@ -270,8 +270,8 @@ func updateXdsIpAndRollout(c *kubernetes.Clientset, ip string, port string) erro
 		return err
 	}
 
-	// Trigger rollout for higress-gateway deployment
-	err = triggerRollout(c, "higress-gateway")
+	// Trigger rollout for aigateway-gateway deployment
+	err = triggerRollout(c, "aigateway-gateway")
 	if err != nil {
 		return err
 	}
@@ -281,7 +281,7 @@ func updateXdsIpAndRollout(c *kubernetes.Clientset, ip string, port string) erro
 
 // triggerRollout triggers rollout for the specified deployment
 func triggerRollout(clientset *kubernetes.Clientset, deploymentName string) error {
-	deploymentsClient := clientset.AppsV1().Deployments("higress-system")
+	deploymentsClient := clientset.AppsV1().Deployments("aigateway-system")
 
 	// Get the deployment
 	deployment, err := deploymentsClient.Get(context.TODO(), deploymentName, metav1.GetOptions{})
@@ -325,7 +325,7 @@ func promptCodeDebug(writer io.Writer, t string) bool {
 	answer := ""
 	for {
 		fmt.Fprintf(writer, "This will start set xds address to %s in higress-config ConfigMap "+
-			"and trigger rollout for higress-controller and higress-gateway deployments. \nProceed? (y/N)", t)
+			"and trigger rollout for higress-controller and aigateway-gateway deployments. \nProceed? (y/N)", t)
 		fmt.Scanln(&answer)
 		if answer == "y" {
 			return true

@@ -41,7 +41,7 @@ spec:
           image: "{{ .Values.controller.hub | default .Values.global.hub }}/higress/{{ .Values.controller.image | default "higress" }}:{{ .Values.controller.tag | default .Chart.AppVersion }}"
           args:
           - "serve"
-          - --gatewaySelectorKey=higress
+          - --gatewaySelectorKey=aigateway
           - --gatewaySelectorValue={{ .Release.Namespace }}-{{ include "gateway.name" . }}
           - --gatewayHttpPort={{ .Values.gateway.httpPort }}
           - --gatewayHttpsPort={{ .Values.gateway.httpsPort }}

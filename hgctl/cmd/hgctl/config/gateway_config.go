@@ -63,7 +63,7 @@ func NewDefaultGetEnvoyConfigOptions() *GetEnvoyConfigOptions {
 	return &GetEnvoyConfigOptions{
 		IncludeEds:      true,
 		PodName:         "",
-		PodNamespace:    "higress-system",
+		PodNamespace:    "aigateway-system",
 		BindAddress:     "localhost",
 		Output:          "json",
 		EnvoyConfigType: AllEnvoyConfigType,
@@ -112,7 +112,7 @@ func retrieveConfigDump(podName, podNamespace, bindAddress string, includeEds bo
 		if err != nil {
 			return nil, fmt.Errorf("failed to build kubernetes client: %w", err)
 		}
-		podList, err := c.PodsForSelector(podNamespace, "app=higress-gateway")
+		podList, err := c.PodsForSelector(podNamespace, "app=aigateway-gateway")
 		if err != nil {
 			return nil, err
 		}

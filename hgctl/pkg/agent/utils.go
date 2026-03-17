@@ -154,8 +154,8 @@ func GetHigressGatewayServiceIP() (string, error) {
 		return promptForServiceKubeSettingsAndRetry()
 	}
 
-	namespace := "higress-system"
-	svc, err := clientset.CoreV1().Services(namespace).Get(context.Background(), "higress-gateway", metav1.GetOptions{})
+	namespace := "aigateway-system"
+	svc, err := clientset.CoreV1().Services(namespace).Get(context.Background(), "aigateway-gateway", metav1.GetOptions{})
 	if err != nil || svc == nil {
 		color.Yellow("⚠️ Could not find Higress Gateway Service in namespace '%s'.", namespace)
 		return promptForServiceKubeSettingsAndRetry()
@@ -170,7 +170,7 @@ func GetHigressGatewayServiceIP() (string, error) {
 	return ip, nil
 }
 
-// higress-gateway should always be LoadBalancer
+// aigateway-gateway should always be LoadBalancer
 func extractServiceIP(clientset *k8s.Clientset, namespace string, svc *v1.Service) (string, error) {
 	return svc.Spec.ClusterIP, nil
 
@@ -205,7 +205,7 @@ func promptForServiceKubeSettingsAndRetry() (string, error) {
 
 	nsPrompt := promptui.Prompt{
 		Label:   "Enter Higress namespace",
-		Default: "higress-system",
+		Default: "aigateway-system",
 	}
 	namespace, err := nsPrompt.Run()
 	if err != nil {
@@ -222,7 +222,7 @@ func promptForServiceKubeSettingsAndRetry() (string, error) {
 		return "", fmt.Errorf("failed to create kubernetes client: %v", err)
 	}
 
-	svc, err := clientset.CoreV1().Services(namespace).Get(context.Background(), "higress-gateway", metav1.GetOptions{})
+	svc, err := clientset.CoreV1().Services(namespace).Get(context.Background(), "aigateway-gateway", metav1.GetOptions{})
 	if err != nil || svc == nil {
 		color.Red("❌ Higress Gateway Service not found in namespace '%s'", namespace)
 		return "", fmt.Errorf("service not found")
@@ -244,9 +244,12 @@ func getConsoleCredentials(profile *helm.Profile) (username, password string, er
 		return "", "", fmt.Errorf("failed to build kubernetes client: %w", err)
 	}
 
-	secret, err := cliClient.KubernetesInterface().CoreV1().Secrets(profile.Global.Namespace).Get(context.Background(), "higress-console", metav1.GetOptions{})
+	secret, err := cliClient.KubernetesInterface().CoreV1().Secrets(profile.Global.Namespace).Get(context.Background(), "aigateway-console", metav1.GetOptions{})
 	if err != nil {
-		return "", "", err
+		secret, err = cliClient.KubernetesInterface().CoreV1().Secrets(profile.Global.Namespace).Get(context.Background(), "higress-console", metav1.GetOptions{})
+		if err != nil {
+			return "", "", err
+		}
 	}
 	return string(secret.Data[SecretConsoleUser]), string(secret.Data[SecretConsolePwd]), nil
 }

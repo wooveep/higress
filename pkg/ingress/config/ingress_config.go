@@ -46,6 +46,7 @@ import (
 	"istio.io/istio/pkg/log"
 	"istio.io/istio/pkg/util/sets"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	listersv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 
@@ -121,7 +122,8 @@ type IngressConfig struct {
 
 	watchedSecretSet sets.Set[string]
 
-	RegistryReconciler *reconcile.Reconciler
+	RegistryReconciler        *reconcile.Reconciler
+	registryReconcilerVersion string
 
 	mcpbridgeController mcpbridge.McpBridgeController
 
@@ -428,6 +430,30 @@ func (m *IngressConfig) createWrapperConfigs(configs []config.Config) []common.W
 	return wrapperConfigs
 }
 
+func (m *IngressConfig) ensureMcpBridgeReconciled() {
+	if m.mcpbridgeLister == nil {
+		return
+	}
+	mcpbridge, err := m.mcpbridgeLister.McpBridges(m.namespace).Get(DefaultMcpbridgeName)
+	if err != nil {
+		return
+	}
+	m.mutex.RLock()
+	synced := m.RegistryReconciler != nil && m.registryReconcilerVersion == mcpbridge.ResourceVersion
+	m.mutex.RUnlock()
+	if synced {
+		return
+	}
+	IngressLog.Infof("Bootstrapping McpBridge %s/%s from current store", m.namespace, DefaultMcpbridgeName)
+	m.AddOrUpdateMcpBridge(util.ClusterNamespacedName{
+		NamespacedName: types.NamespacedName{
+			Namespace: m.namespace,
+			Name:      DefaultMcpbridgeName,
+		},
+		ClusterId: m.clusterId,
+	})
+}
+
 func (m *IngressConfig) convertGateways(configs []common.WrapperConfig) []config.Config {
 	convertOptions := common.ConvertOptions{
 		IngressDomainCache: common.NewIngressDomainCache(),
@@ -481,6 +507,7 @@ func (m *IngressConfig) convertGateways(configs []common.WrapperConfig) []config
 }
 
 func (m *IngressConfig) convertVirtualService(configs []common.WrapperConfig) []config.Config {
+	m.ensureMcpBridgeReconciled()
 	convertOptions := common.ConvertOptions{
 		IngressRouteCache: common.NewIngressRouteCache(),
 		VirtualServices:   map[string]*common.WrapperVirtualService{},
@@ -712,6 +739,7 @@ func (m *IngressConfig) convertEnvoyFilter(convertOptions *common.ConvertOptions
 }
 
 func (m *IngressConfig) convertWasmPlugin([]common.WrapperConfig) []config.Config {
+	m.ensureMcpBridgeReconciled()
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
 	out := make([]config.Config, 0, len(m.wasmPlugins))
@@ -736,6 +764,7 @@ func (m *IngressConfig) convertWasmPlugin([]common.WrapperConfig) []config.Confi
 }
 
 func (m *IngressConfig) convertServiceEntry([]common.WrapperConfig) []config.Config {
+	m.ensureMcpBridgeReconciled()
 	if m.RegistryReconciler == nil {
 		return nil
 	}
@@ -771,6 +800,7 @@ func (m *IngressConfig) convertServiceEntry([]common.WrapperConfig) []config.Con
 }
 
 func (m *IngressConfig) convertDestinationRule(configs []common.WrapperConfig) []config.Config {
+	m.ensureMcpBridgeReconciled()
 	convertOptions := common.ConvertOptions{
 		Service2TrafficPolicy: map[common.ServiceKey]*common.WrapperTrafficPolicy{},
 	}
@@ -1225,6 +1255,7 @@ func (m *IngressConfig) AddOrUpdateMcpBridge(clusterNamespacedName util.ClusterN
 			clusterNamespacedName.Namespace, clusterNamespacedName.Name)
 		return
 	}
+	m.mutex.Lock()
 	if m.RegistryReconciler == nil {
 		m.RegistryReconciler = reconcile.NewReconciler(func() {
 			seMetadata := config.Meta{
@@ -1287,11 +1318,15 @@ func (m *IngressConfig) AddOrUpdateMcpBridge(clusterNamespacedName util.ClusterN
 		m.configmapMgr.RegisterMcpServerProvider(m.RegistryReconciler)
 	}
 	reconciler := m.RegistryReconciler
+	m.mutex.Unlock()
 	err = reconciler.Reconcile(mcpbridge)
 	if err != nil {
 		IngressLog.Errorf("Mcpbridge reconcile failed, err:%v", err)
 		return
 	}
+	m.mutex.Lock()
+	m.registryReconcilerVersion = mcpbridge.ResourceVersion
+	m.mutex.Unlock()
 	IngressLog.Info("Mcpbridge reconciled")
 }
 
@@ -1300,9 +1335,13 @@ func (m *IngressConfig) DeleteMcpBridge(clusterNamespacedName util.ClusterNamesp
 	if clusterNamespacedName.Name != "default" || clusterNamespacedName.Namespace != m.namespace {
 		return
 	}
-	if m.RegistryReconciler != nil {
-		go m.RegistryReconciler.Reconcile(nil)
-		m.RegistryReconciler = nil
+	m.mutex.Lock()
+	reconciler := m.RegistryReconciler
+	m.RegistryReconciler = nil
+	m.registryReconcilerVersion = ""
+	m.mutex.Unlock()
+	if reconciler != nil {
+		go reconciler.Reconcile(nil)
 	}
 }
 
@@ -1887,6 +1926,12 @@ func (m *IngressConfig) Run(stop <-chan struct{}) {
 	go m.wasmPluginController.Run(stop)
 	go m.http2rpcController.Run(stop)
 	go m.configmapMgr.HigressConfigController.Run(stop)
+	go func() {
+		if !cache.WaitForCacheSync(stop, m.mcpbridgeController.Informer().HasSynced) {
+			return
+		}
+		m.ensureMcpBridgeReconciled()
+	}()
 }
 
 func (m *IngressConfig) HasSynced() bool {

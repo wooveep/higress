@@ -87,8 +87,8 @@ func newDashboardCmd() *cobra.Command {
 	dashboardCmd.PersistentFlags().BoolVar(&browser, "browser", true,
 		"When --browser is supplied as false, hgctl dashboard will not open the browser. "+
 			"Default is true which means hgctl dashboard will always open a browser to view the dashboard.")
-	dashboardCmd.PersistentFlags().StringVarP(&addonNamespace, "namespace", "n", "higress-system",
-		"Namespace where the addon is running, if not specified, higress-system would be used")
+	dashboardCmd.PersistentFlags().StringVarP(&addonNamespace, "namespace", "n", "aigateway-system",
+		"Namespace where the addon is running, if not specified, aigateway-system would be used")
 	dashboardCmd.PersistentFlags().StringVarP(&bindAddress, "listen", "l", "localhost", "The address to bind to")
 
 	prom := promDashCmd()
@@ -100,9 +100,9 @@ func newDashboardCmd() *cobra.Command {
 	dashboardCmd.AddCommand(graf)
 
 	envoy := envoyDashCmd()
-	envoy.PersistentFlags().StringVarP(&labelSelector, "selector", "s", "app=higress-gateway", "Label selector")
+	envoy.PersistentFlags().StringVarP(&labelSelector, "selector", "s", "app=aigateway-gateway", "Label selector")
 	envoy.PersistentFlags().StringVarP(&envoyDashNs, "namespace", "n", "",
-		"Namespace where the addon is running, if not specified, higress-system would be used")
+		"Namespace where the addon is running, if not specified, aigateway-system would be used")
 	envoy.PersistentFlags().IntVar(&proxyAdminPort, "ui-port", defaultProxyAdminPort, "The component dashboard UI port.")
 	dashboardCmd.AddCommand(envoy)
 
@@ -259,8 +259,8 @@ func envoyDashCmd() *cobra.Command {
 		Use:   "envoy [<type>/]<name>[.<namespace>]",
 		Short: "Open Envoy admin web UI",
 		Long:  `Open the Envoy admin dashboard for a higress gateway`,
-		Example: `  # Open Envoy dashboard for the higress-gateway-56f9b9797-b9nnc
-  hgctl dashboard envoy higress-gateway-56f9b9797-b9nnc
+		Example: `  # Open Envoy dashboard for the aigateway-gateway-56f9b9797-b9nnc
+  hgctl dashboard envoy aigateway-gateway-56f9b9797-b9nnc
 
   # with short syntax
   hgctl dash envoy

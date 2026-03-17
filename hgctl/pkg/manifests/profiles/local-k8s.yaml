@@ -4,7 +4,7 @@ global:
   ingressClass: higress
   enableIstioAPI: true
   enableGatewayAPI: true
-  namespace: higress-system
+  namespace: aigateway-system
 
 console:
   replicas: 1

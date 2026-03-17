@@ -63,7 +63,7 @@ func create(w io.Writer, target string) error {
 
 var configHelpTmpl = &PluginConf{
 	Name:        "Plugin Name",
-	Namespace:   "higress-system",
+	Namespace:   "aigateway-system",
 	Title:       "Display Name",
 	Description: "Plugin Description",
 	IconUrl:     "Plugin Icon",

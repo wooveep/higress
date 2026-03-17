@@ -66,7 +66,7 @@ const (
 	DefaultStatusUpdateInterval = 10 * time.Second
 
 	AppKey            = "app"
-	AppValue          = "higress-gateway"
+	AppValue          = "aigateway-gateway"
 	SvcHostNameSuffix = ".multiplenic"
 )
 

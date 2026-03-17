@@ -24,7 +24,7 @@ global:
   # resources with the nginx ingress class or without any ingress class.
   # 2. When the ingress class is set empty, the higress controller will watch all ingress
   # resources in the k8s cluster.
-  ingressClass: "higress"
+  ingressClass: "aigateway"
   # -- If not empty, Higress Controller will only watch resources in the specified namespace.
   # When isolating different business systems using K8s namespace,
   # if each namespace requires a standalone gateway instance,
@@ -418,7 +418,7 @@ meshConfig:
   # No hurry to do this in 1.6, we're trying to prove the code.
 
 gateway:
-  name: "higress-gateway"
+  name: "aigateway-gateway"
   # -- Number of Higress Gateway pods
   replicas: 2
   image: gateway

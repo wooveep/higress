@@ -48,7 +48,7 @@ template:
           - --proxyLogLevel={{- default "warning" .Values.global.proxy.logLevel }}
           - --proxyComponentLogLevel={{- default "misc:error" .Values.global.proxy.componentLogLevel }}
           - --log_output_level={{- default "default:info" .Values.global.logging.level }}
-          - --serviceCluster=higress-gateway
+          - --serviceCluster=aigateway-gateway
         securityContext:
         {{- if .Values.gateway.containerSecurityContext }}
           {{- toYaml .Values.gateway.containerSecurityContext | nindent 10 }}
@@ -118,7 +118,7 @@ template:
         - name: ISTIO_META_CLUSTER_ID
           value: "{{ $.Values.clusterName | default `Kubernetes` }}"
         - name: INSTANCE_NAME
-          value: "higress-gateway"
+          value: "aigateway-gateway"
         {{- if .Values.global.liteMetrics }}
         - name: LITE_METRICS
           value: "on"

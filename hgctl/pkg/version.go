@@ -151,14 +151,14 @@ func versions(w io.Writer, output string, client bool) error {
 		return err
 	}
 
-	if err := retrieveVersion(w, &v, higressGatewayContainerName, "envoy --version", "app=higress-gateway", c, func(s string) (*version.Info, error) {
+	if err := retrieveVersion(w, &v, higressGatewayContainerName, "envoy --version", "app=aigateway-gateway", c, func(s string) (*version.Info, error) {
 		if len(strings.Split(s, ":")) != 2 {
 			return nil, nil
 		}
 		proxyVersion := strings.TrimSpace(strings.Split(s, ":")[1])
 		return &version.Info{
 			GatewayVersion: proxyVersion,
-			Type:           "higress-gateway",
+			Type:           "aigateway-gateway",
 		}, nil
 	}); err != nil {
 		return err
