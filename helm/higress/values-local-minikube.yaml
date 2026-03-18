@@ -1,0 +1,55 @@
+global:
+  ingressClass: aigateway
+  local: true
+  enableRedis: true
+  onlyPushRouteCluster: false
+  o11y:
+    enabled: true
+    grafana:
+      image:
+        repository: local/grafana
+        tag: 9.3.6
+    prometheus:
+      image:
+        repository: local/prometheus
+        tag: v2.40.7
+    loki:
+      image:
+        repository: local/loki
+        tag: 2.9.4
+    promtail:
+      image:
+        repository: local/promtail
+        tag: 2.9.4
+  imagePullPolicy: IfNotPresent
+
+higress-core:
+  gateway:
+    name: aigateway-gateway
+    repository: aigateway-gateway
+    tag: "0.0.1"
+  controller:
+    name: aigateway-controller
+    repository: aigateway-controller
+    tag: "0.0.1"
+  pilot:
+    repository: aigateway-pilot
+    tag: "0.0.1"
+  pluginServer:
+    name: aigateway-plugin-server
+  redis:
+    redis:
+      name: aigateway-redis
+      repository: redis
+      tag: "7.2-alpine"
+
+higress-console:
+  name: aigateway-console
+  controller:
+    serviceName: aigateway-controller
+  service:
+    type: LoadBalancer
+  image:
+    repository: aigateway-console
+    tag: "0.0.2"
+    pullPolicy: IfNotPresent

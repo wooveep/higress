@@ -39,7 +39,10 @@ template:
     {{- end }}
     containers:
       - name: higress-gateway
-        image: "{{ .Values.gateway.hub | default .Values.global.hub }}/higress/{{ .Values.gateway.image | default "gateway" }}:{{ .Values.gateway.tag | default .Chart.AppVersion }}"
+        image: "{{ include "higress.image" (dict "repository" .Values.gateway.repository "hub" (.Values.gateway.hub | default .Values.global.hub) "image" (.Values.gateway.image | default "gateway") "tag" (.Values.gateway.tag | default .Chart.AppVersion)) }}"
+{{- if .Values.global.imagePullPolicy }}
+        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+{{- end }}
         args:
           - proxy
           - router
@@ -295,7 +298,7 @@ template:
       emptyDir: {}
     - name: promtail-config
       configMap:
-        name: higress-promtail
+        name: aigateway-promtail
     {{- end }}
     - name: podinfo
       downwardAPI:

@@ -14,6 +14,8 @@ global:
 redis:
   # -- Specify the name
   name: redis-stack-server
+  # -- Full image repository for Redis. If set, it overrides hub/image.
+  repository: ""
   # -- Specify the image
   image: "redis-stack-server"
   # -- Specify the tag

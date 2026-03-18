@@ -14,7 +14,7 @@ dependencies:
   repository: "file://../core"
   version: 2.2.0
 - name: higress-console
-  repository: "https://higress.io/helm-charts/"
-  version: 2.2.1
+  repository: "file://../../../higress-console/helm"
+  version: 2.1.0
 type: application
 version: 2.2.1

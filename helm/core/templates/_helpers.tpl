@@ -51,8 +51,20 @@ aigateway: {{ .Release.Namespace }}-{{ include "gateway.name" . }}
 {{- end }}
 {{- end }}
 
+{{- define "higress.image" -}}
+{{- if .repository -}}
+{{- if .tag -}}
+{{- printf "%s:%s" .repository .tag -}}
+{{- else -}}
+{{- .repository -}}
+{{- end -}}
+{{- else -}}
+{{- printf "%s/higress/%s:%s" .hub .image .tag -}}
+{{- end -}}
+{{- end }}
+
 {{- define "controller.name" -}}
-{{- .Values.controller.name | default "higress-controller" -}}
+{{- .Values.controller.name | default "aigateway-controller" -}}
 {{- end }}
 
 {{- define "controller.chart" -}}
@@ -119,7 +131,7 @@ kind: VMPodScrape
 {{- end -}}
 
 {{- define "pluginServer.name" -}}
-{{- .Values.pluginServer.name | default "higress-plugin-server" -}}
+{{- .Values.pluginServer.name | default "aigateway-plugin-server" -}}
 {{- end }}
 
 {{- define "pluginServer.chart" -}}

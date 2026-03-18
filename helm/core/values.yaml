@@ -18,7 +18,7 @@ global:
   hostRDSMergeSubset: false
   onlyPushRouteCluster: true
   # -- IngressClass filters which ingress resources the higress controller watches.
-  # The default ingress class is higress.
+  # The default ingress class is aigateway.
   # There are some special cases for special ingress class.
   # 1. When the ingress class is set as nginx, the higress controller will watch ingress
   # resources with the nginx ingress class or without any ingress class.
@@ -421,6 +421,8 @@ gateway:
   name: "aigateway-gateway"
   # -- Number of Higress Gateway pods
   replicas: 2
+  # -- Full image repository for the gateway container. If set, it overrides hub/image.
+  repository: ""
   image: gateway
 
   # -- Use a `DaemonSet` or `Deployment`
@@ -558,9 +560,11 @@ gateway:
     rawSpec: {}
 
 controller:
-  name: "higress-controller"
+  name: "aigateway-controller"
   # -- Number of Higress Controller pods
   replicas: 1
+  # -- Full image repository for the controller container. If set, it overrides hub/image.
+  repository: ""
   image: higress
 
   hub: "" # Will use global.hub if not set
@@ -662,7 +666,8 @@ pilot:
   hub: "" # Will use global.hub if not set
   tag: ""
 
-  # -- Can be a full hub/image:tag
+  # -- Full image repository for pilot. If set, it overrides hub/image.
+  repository: ""
   image: pilot
   traceSampling: 1.0
 
@@ -772,6 +777,8 @@ gzip:
 redis:
   redis:
     name: redis-stack-server
+    # -- Full image repository for Redis. If set, it overrides hub/image.
+    repository: ""
     # -- Specify the image
     image: "redis-stack-server"
     # -- Specify the tag
@@ -807,7 +814,7 @@ redis:
       size: 1Gi
 
 pluginServer:
-  name: "higress-plugin-server"
+  name: "aigateway-plugin-server"
   # -- Number of Higress Plugin Server pods, 2 recommended for high availability
   replicas: 2
   image: plugin-server

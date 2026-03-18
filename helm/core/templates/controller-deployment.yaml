@@ -38,7 +38,10 @@ spec:
         - name: {{ .Chart.Name }}
           securityContext:
             {{- toYaml .Values.controller.securityContext | nindent 12 }}
-          image: "{{ .Values.controller.hub | default .Values.global.hub }}/higress/{{ .Values.controller.image | default "higress" }}:{{ .Values.controller.tag | default .Chart.AppVersion }}"
+          image: "{{ include "higress.image" (dict "repository" .Values.controller.repository "hub" (.Values.controller.hub | default .Values.global.hub) "image" (.Values.controller.image | default "higress") "tag" (.Values.controller.tag | default .Chart.AppVersion)) }}"
+{{- if .Values.global.imagePullPolicy }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+{{- end }}
           args:
           - "serve"
           - --gatewaySelectorKey=aigateway
@@ -104,7 +107,7 @@ spec:
           - name: log
             mountPath: /var/log
         - name: discovery
-          image: "{{ .Values.pilot.hub | default .Values.global.hub }}/higress/{{ .Values.pilot.image | default "pilot" }}:{{ .Values.pilot.tag | default .Chart.AppVersion }}"
+          image: "{{ include "higress.image" (dict "repository" .Values.pilot.repository "hub" (.Values.pilot.hub | default .Values.global.hub) "image" (.Values.pilot.image | default "pilot") "tag" (.Values.pilot.tag | default .Chart.AppVersion)) }}"
 {{- if .Values.global.imagePullPolicy }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
 {{- end }}
