@@ -118,6 +118,17 @@ data:
     {{- if and (hasKey .Values "tracing") .Values.tracing.enable }}
     {{- $_ := set $newData "tracing" .Values.tracing }}
     {{- end }}
+    {{- if not (empty .Values.mcpServer) }}
+    {{- $mcpServerData := deepCopy .Values.mcpServer }}
+    {{- if and .Values.global.enableRedis (kindIs "map" $mcpServerData) }}
+    {{- $redisConfig := get $mcpServerData "redis" | default dict }}
+    {{- if empty (get $redisConfig "address") }}
+    {{- $_ := set $redisConfig "address" (printf "%s.%s.svc.%s:%v" (.Values.redis.redis.name | default "redis-stack-server") .Release.Namespace (.Values.global.proxy.clusterDomain | default "cluster.local") (.Values.redis.redis.service.port | default 6379)) }}
+    {{- end }}
+    {{- $_ := set $mcpServerData "redis" $redisConfig }}
+    {{- end }}
+    {{- $_ := set $newData "mcpServer" $mcpServerData }}
+    {{- end }}
     {{- toYaml (merge $existingData $newData) | nindent 4 }}
   # Configuration file for the mesh networks to be used by the Split Horizon EDS.
   meshNetworks: |-

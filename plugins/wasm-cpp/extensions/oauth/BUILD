@@ -22,7 +22,7 @@ proxy_wasm_cc_binary(
         "plugin.h",
     ],
     deps = [
-        "//common:random_util",
+
         "@com_github_thalhammer_jwt_cpp//:lib",
         "@com_github_mariusbancila_stduuid//:lib",
         "@com_google_absl//absl/container:btree",

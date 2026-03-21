@@ -1,10 +1,13 @@
+# Production gray deployment values for the parent higress chart.
+# Update tag values if your release pipeline publishes a different version.
+
 global:
+  local: false
   ingressClass: aigateway
-  local: true
   enableRedis: true
-  onlyPushRouteCluster: false
+  imagePullPolicy: IfNotPresent
   o11y:
-    enabled: true
+    enabled: false
     grafana:
       image:
         repository: aigateway/grafana
@@ -21,7 +24,6 @@ global:
       image:
         repository: aigateway/promtail
         tag: 2.9.4
-  imagePullPolicy: IfNotPresent
 
 higress-core:
   mcpServer:
@@ -32,31 +34,33 @@ higress-core:
     match_list: []
     servers: []
   gateway:
-    name: aigateway/gateway
-    repository: aigateway-gateway
+    repository: aigateway/gateway
     tag: "2.2.0"
   controller:
-    name: aigateway/controller
-    repository: aigateway-controller
+    repository: aigateway/controller
     tag: "2.2.0"
   pilot:
     repository: aigateway/pilot
     tag: "2.2.0"
   pluginServer:
-    name: aigateway-plugin-server
+    repository: aigateway/plugin-server
+    tag: "1.0.0"
   redis:
     redis:
-      name: aigateway/redis-stack-server
-      repository: redis
+      repository: aigateway/redis-stack-server
       tag: "7.4.0"
 
 higress-console:
   name: aigateway-console
   controller:
     serviceName: aigateway-controller
-  service:
-    type: LoadBalancer
   image:
     repository: aigateway/console
     tag: "2.1.0"
     pullPolicy: IfNotPresent
+  pluginServer:
+    serviceName: aigateway-plugin-server
+  certmanager:
+    image:
+      repository: aigateway
+      tag: v1.11.0

@@ -1,0 +1,43 @@
+# Production gray deployment values for the standalone higress-core chart.
+# Update tag values if your release pipeline publishes a different version.
+
+global:
+  local: false
+  ingressClass: aigateway
+  enableRedis: true
+  imagePullPolicy: IfNotPresent
+  o11y:
+    enabled: false
+    promtail:
+      image:
+        repository: aigateway/promtail
+        tag: 2.9.4
+
+mcpServer:
+  enable: true
+  sse_path_suffix: /sse
+  redis:
+    db: 0
+  match_list: []
+  servers: []
+
+gateway:
+  repository: aigateway/gateway
+  tag: "2.2.0"
+
+controller:
+  repository: aigateway/controller
+  tag: "2.2.0"
+
+pilot:
+  repository: aigateway/pilot
+  tag: "2.2.0"
+
+pluginServer:
+  repository: aigateway/plugin-server
+  tag: "1.0.0"
+
+redis:
+  redis:
+    repository: aigateway/redis-stack-server
+    tag: "7.4.0"

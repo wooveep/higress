@@ -100,8 +100,50 @@ def wasm_libraries():
         urls = ["https://github.com/google/jwt_verify_lib/archive/26c22c0ce1bc607eec8fa5dd26b707378adc7a88.tar.gz"],
         strip_prefix = "jwt_verify_lib-26c22c0ce1bc607eec8fa5dd26b707378adc7a88"
     )
-    
-    
+
+    http_archive(
+        name = "com_github_kazuho_picojson",
+        urls = ["https://github.com/kazuho/picojson/archive/v1.3.0.tar.gz"],
+        strip_prefix = "picojson-1.3.0",
+        build_file_content = """
+cc_library(
+    name = "lib",
+    hdrs = ["picojson.h"],
+    include_prefix = "picojson",
+    visibility = ["//visibility:public"],
+)
+""",
+    )
+
+    http_archive(
+        name = "com_github_thalhammer_jwt_cpp",
+        urls = ["https://github.com/Thalhammer/jwt-cpp/archive/v0.6.0.tar.gz"],
+        strip_prefix = "jwt-cpp-0.6.0",
+        build_file_content = """
+cc_library(
+    name = "lib",
+    hdrs = glob(["include/jwt-cpp/**/*.h"]),
+    strip_include_prefix = "include",
+    deps = ["@com_github_kazuho_picojson//:lib"],
+    visibility = ["//visibility:public"],
+)
+""",
+    )
+
+    http_archive(
+        name = "com_github_mariusbancila_stduuid",
+        urls = ["https://github.com/mariusbancila/stduuid/archive/v1.2.2.tar.gz"],
+        strip_prefix = "stduuid-1.2.2",
+        build_file_content = """
+cc_library(
+    name = "lib",
+    hdrs = glob(["include/**/*.h"]),
+    strip_include_prefix = "include",
+    visibility = ["//visibility:public"],
+)
+""",
+    )
+
 def declare_wasm_image_targets(name, wasm_file):
     # Rename to the spec compatible name.
     copy_file("copy_original_file", wasm_file, "plugin.wasm")

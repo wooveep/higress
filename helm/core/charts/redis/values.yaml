@@ -19,7 +19,7 @@ redis:
   # -- Specify the image
   image: "redis-stack-server"
   # -- Specify the tag
-  tag: "7.4.0-v3"
+  tag: "7.4.0"
   # -- Specify the number of replicas
   replicas: 1
   # -- Specify the password, if not set, no password is used

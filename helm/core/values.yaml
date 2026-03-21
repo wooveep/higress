@@ -1,4 +1,7 @@
 revision: ""
+
+mcpServer: {}
+
 global:
   enableH3: false
   enableIPv6: false
@@ -782,7 +785,7 @@ redis:
     # -- Specify the image
     image: "redis-stack-server"
     # -- Specify the tag
-    tag: "7.4.0-v3"
+    tag: "7.4.0"
     # -- Specify the number of replicas
     replicas: 1
     # -- Specify the password, if not set, no password is used
@@ -817,6 +820,8 @@ pluginServer:
   name: "aigateway-plugin-server"
   # -- Number of Higress Plugin Server pods, 2 recommended for high availability
   replicas: 2
+  # -- Full image repository for plugin server. If set, it overrides hub/image.
+  repository: ""
   image: plugin-server
 
   hub: "" # Will use global.hub if not set
