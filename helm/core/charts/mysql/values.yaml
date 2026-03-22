@@ -1,0 +1,32 @@
+mysql:
+  enabled: false
+  name: ""
+  repository: mariadb
+  tag: "11.4"
+  pullPolicy: IfNotPresent
+  port: 3306
+
+auth:
+  existingSecret: ""
+  username: portal
+  password: portal
+  database: aigateway_portal
+  rootPassword: root
+  usernameKey: username
+  passwordKey: password
+  databaseKey: database
+  rootPasswordKey: root-password
+
+primary:
+  persistence:
+    enabled: true
+    storageClass: ""
+    size: 10Gi
+
+podAnnotations: {}
+podSecurityContext: {}
+securityContext: {}
+resources: {}
+nodeSelector: {}
+affinity: {}
+tolerations: []

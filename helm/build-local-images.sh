@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 HIGRESS_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 CONSOLE_DIR="${CONSOLE_DIR:-$(cd -- "${HIGRESS_DIR}/../higress-console" && pwd)}"
 PLUGIN_SERVER_DIR="${PLUGIN_SERVER_DIR:-$(cd -- "${HIGRESS_DIR}/../plugin-server" && pwd)}"
+PORTAL_DIR="${PORTAL_DIR:-${HIGRESS_DIR}/../aigateway-portal}"
 
 WRAPPER_VALUES_FILE="${WRAPPER_VALUES_FILE:-${SCRIPT_DIR}/higress/values-production-gray.yaml}"
 CORE_VALUES_FILE="${CORE_VALUES_FILE:-${SCRIPT_DIR}/core/values-production-gray.yaml}"
@@ -22,7 +23,7 @@ PLUGIN_SERVER_LOCAL_PLUGINS_DIR="${PLUGIN_SERVER_LOCAL_PLUGINS_DIR:-${PLUGIN_SER
 ARCH="${ARCH:-amd64}"
 BASE_HUB="${BASE_HUB:-higress-registry.cn-hangzhou.cr.aliyuncs.com/higress}"
 ORAS_IMAGE="${ORAS_IMAGE:-ghcr.io/oras-project/oras:v1.2.3}"
-COMPONENTS="${COMPONENTS:-aigateway,controller,gateway,pilot,console,plugins,plugin-server}"
+COMPONENTS="${COMPONENTS:-aigateway,controller,gateway,pilot,console,portal,plugins,plugin-server}"
 DRY_RUN="${DRY_RUN:-false}"
 
 PLUGIN_BUILD_PLAN_FILE=""
@@ -45,18 +46,19 @@ Usage:
 Examples:
   ./helm/build-local-images.sh
   ./helm/build-local-images.sh --dry-run
-  ./helm/build-local-images.sh --components aigateway,controller,gateway,console,plugins,plugin-server
+  ./helm/build-local-images.sh --components aigateway,controller,gateway,console,portal,plugins,plugin-server
 
 Environment overrides:
   WRAPPER_VALUES_FILE           Parent chart values file. Default: helm/higress/values-production-gray.yaml
   CORE_VALUES_FILE              higress-core values file. Default: helm/core/values-production-gray.yaml
   CONSOLE_VALUES_FILE           higress-console values file. Default: ../higress-console/helm/values-production-gray.yaml
   CONSOLE_DIR                   Path to the higress-console repo. Default: ../higress-console
+  PORTAL_DIR                    Path to the aigateway-portal repo. Default: ../aigateway-portal
   PLUGIN_SERVER_DIR             Path to the plugin-server repo. Default: ../plugin-server
   ARCH                          Target architecture. Default: amd64
   BASE_HUB                      Base image hub used by the existing higress build scripts.
   COMPONENTS                    Comma-separated list:
-                                aigateway,controller,gateway,pilot,console,plugins,plugin-server
+                                aigateway,controller,gateway,pilot,console,portal,plugins,plugin-server
   LOCAL_PLUGIN_OUTPUT_DIR       Root directory for generated Wasm artifacts and OCI layouts.
   PLUGIN_SERVER_LOCAL_PLUGINS_DIR
                                 Generated plugin-server local plugin directory.
@@ -142,6 +144,22 @@ run_in_dir() {
   fi
 }
 
+remove_dir_with_docker() {
+  local dir="$1"
+  local parent_dir base_name
+
+  parent_dir="$(dirname "${dir}")"
+  base_name="$(basename "${dir}")"
+
+  echo "+ docker run --rm -v ${parent_dir}:/workspace alpine:3.20 sh -c rm -rf /workspace/${base_name}"
+  if [[ "${DRY_RUN}" != "true" ]]; then
+    docker run --rm \
+      -v "${parent_dir}:/workspace" \
+      alpine:3.20 \
+      sh -c "rm -rf /workspace/${base_name}"
+  fi
+}
+
 prepare_istio_cache_volumes() {
   local uid gid
 
@@ -169,7 +187,9 @@ reset_dir() {
   local dir="$1"
   echo "+ rm -rf ${dir} && mkdir -p ${dir}"
   if [[ "${DRY_RUN}" != "true" ]]; then
-    rm -rf "${dir}"
+    if ! rm -rf "${dir}" 2>/dev/null; then
+      remove_dir_with_docker "${dir}"
+    fi
     mkdir -p "${dir}"
   fi
 }
@@ -207,6 +227,11 @@ for dir in "${CONSOLE_DIR}" "${PLUGIN_SERVER_DIR}" "${CONSOLE_PLUGIN_RESOURCE_DI
     exit 1
   fi
 done
+
+if has_component "portal" && [[ ! -d "${PORTAL_DIR}" ]]; then
+  echo "Required directory not found: ${PORTAL_DIR}" >&2
+  exit 1
+fi
 
 need_cmd docker
 need_cmd make
@@ -251,6 +276,8 @@ values = {
     "PLUGIN_SERVER_TAG": get(wrapper, "higress-core", "pluginServer", "tag"),
     "CONSOLE_REPOSITORY": get(wrapper, "higress-console", "image", "repository"),
     "CONSOLE_TAG": get(wrapper, "higress-console", "image", "tag"),
+    "PORTAL_BACKEND_REPOSITORY": get(wrapper, "aigateway-portal", "backend", "image", "repository"),
+    "PORTAL_BACKEND_TAG": get(wrapper, "aigateway-portal", "backend", "image", "tag"),
 }
 
 checks = [
@@ -317,6 +344,7 @@ echo "  envoy package    : ${ENVOY_PACKAGE_URL_PATTERN}"
 echo "  plugin output    : ${LOCAL_PLUGIN_OUTPUT_DIR}"
 echo "  plugin layouts   : ${LOCAL_PLUGIN_LAYOUT_ROOT}"
 echo "  plugin-server dir: ${PLUGIN_SERVER_DIR}"
+echo "  portal dir       : ${PORTAL_DIR}"
 
 echo "Resolved image tags:"
 echo "  aigateway    : ${AIGATEWAY_REPOSITORY}:${AIGATEWAY_TAG}"
@@ -324,6 +352,7 @@ echo "  controller   : ${CONTROLLER_REPOSITORY}:${CONTROLLER_TAG}"
 echo "  gateway      : ${GATEWAY_REPOSITORY}:${GATEWAY_TAG}"
 echo "  pilot        : ${PILOT_REPOSITORY}:${PILOT_TAG}"
 echo "  console      : ${CONSOLE_REPOSITORY}:${CONSOLE_TAG}"
+echo "  portal-image : ${PORTAL_BACKEND_REPOSITORY}:${PORTAL_BACKEND_TAG}"
 echo "  plugin-server: ${PLUGIN_SERVER_REPOSITORY}:${PLUGIN_SERVER_TAG}"
 
 prepare_higress_main_context() {
@@ -400,6 +429,18 @@ build_console() {
 
   run_in_dir "${CONSOLE_DIR}/backend" \
     env IMAGE_NAME="${target_image}" VERSION="${CONSOLE_TAG}" ./build.sh
+}
+
+build_portal() {
+  local portal_image="${PORTAL_BACKEND_REPOSITORY}:${PORTAL_BACKEND_TAG}"
+
+  run_in_dir "${PORTAL_DIR}" \
+    docker build \
+      --platform "linux/${ARCH}" \
+      --build-arg TARGETARCH="${ARCH}" \
+      -f backend/Dockerfile \
+      -t "${portal_image}" \
+      .
 }
 
 prepare_plugin_build_plan() {
@@ -542,13 +583,16 @@ build_rust_plugin() {
   local source_dir="$1"
   local stage_dir="$2"
   local plugin_dir_name
+  local uid gid
 
   plugin_dir_name="$(basename "${source_dir}")"
+  uid="$(id -u)"
+  gid="$(id -g)"
 
   run_in_dir "${HIGRESS_DIR}/plugins/wasm-rust" \
     env DOCKER_BUILDKIT=1 docker build \
       --build-arg PLUGIN_NAME="${plugin_dir_name}" \
-      --output "${stage_dir}" \
+      --output "type=local,dest=${stage_dir},uid=${uid},gid=${gid}" \
       -f Dockerfile \
       .
 }
@@ -557,13 +601,16 @@ build_cpp_plugin() {
   local source_dir="$1"
   local stage_dir="$2"
   local plugin_dir_name
+  local uid gid
 
   plugin_dir_name="$(basename "${source_dir}")"
+  uid="$(id -u)"
+  gid="$(id -g)"
 
   run_in_dir "${HIGRESS_DIR}/plugins/wasm-cpp" \
     env DOCKER_BUILDKIT=1 docker build \
       --build-arg PLUGIN_NAME="${plugin_dir_name}" \
-      --output "${stage_dir}" \
+      --output "type=local,dest=${stage_dir},uid=${uid},gid=${gid}" \
       -f Dockerfile \
       .
 }
@@ -573,11 +620,14 @@ write_plugin_oci_layout() {
   local plugin_version="$2"
   local stage_dir="$3"
   local target_ref="/workspace/layouts/plugin/${plugin_name}:${plugin_version}"
+  local uid gid
   local oras_args=(
     push
     --oci-layout
     "${target_ref}"
   )
+  uid="$(id -u)"
+  gid="$(id -g)"
 
   if [[ -f "${stage_dir}/spec.yaml" ]]; then
     oras_args+=("./spec.yaml:application/vnd.module.wasm.spec.v1+yaml")
@@ -597,9 +647,10 @@ write_plugin_oci_layout() {
   oras_args+=("./plugin.tar.gz:application/vnd.oci.image.layer.v1.tar+gzip")
 
   run mkdir -p "${LOCAL_PLUGIN_LAYOUT_ROOT}/plugin"
-  echo "+ docker run --rm -v ${stage_dir}:/workspace/plugin -v ${LOCAL_PLUGIN_LAYOUT_ROOT}:/workspace/layouts -w /workspace/plugin ${ORAS_IMAGE} ${oras_args[*]}"
+  echo "+ docker run --rm --user ${uid}:${gid} -v ${stage_dir}:/workspace/plugin -v ${LOCAL_PLUGIN_LAYOUT_ROOT}:/workspace/layouts -w /workspace/plugin ${ORAS_IMAGE} ${oras_args[*]}"
   if [[ "${DRY_RUN}" != "true" ]]; then
     docker run --rm \
+      --user "${uid}:${gid}" \
       -v "${stage_dir}:/workspace/plugin" \
       -v "${LOCAL_PLUGIN_LAYOUT_ROOT}:/workspace/layouts" \
       -w /workspace/plugin \
@@ -714,6 +765,10 @@ fi
 
 if has_component "console"; then
   build_console
+fi
+
+if has_component "portal"; then
+  build_portal
 fi
 
 if has_component "plugins"; then

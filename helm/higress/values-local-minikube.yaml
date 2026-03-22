@@ -2,6 +2,7 @@ global:
   ingressClass: aigateway
   local: true
   enableRedis: true
+  enablePluginServer: true
   onlyPushRouteCluster: false
   o11y:
     enabled: true
@@ -24,6 +25,13 @@ global:
   imagePullPolicy: IfNotPresent
 
 higress-core:
+  enabled: true
+  mysql:
+    mysql:
+      enabled: true
+      name: mysql-server
+      repository: aigateway/mariadb
+      tag: "11.4"
   mcpServer:
     enable: true
     sse_path_suffix: /sse
@@ -32,31 +40,60 @@ higress-core:
     match_list: []
     servers: []
   gateway:
-    name: aigateway/gateway
-    repository: aigateway-gateway
+    name: aigateway-gateway
+    repository: aigateway/gateway
     tag: "2.2.0"
   controller:
-    name: aigateway/controller
-    repository: aigateway-controller
+    name: aigateway-controller
+    repository: aigateway/controller
     tag: "2.2.0"
   pilot:
     repository: aigateway/pilot
     tag: "2.2.0"
   pluginServer:
     name: aigateway-plugin-server
+    replicas: 1
   redis:
     redis:
-      name: aigateway/redis-stack-server
-      repository: redis
+      name: redis-stack-server
+      repository: aigateway/redis-stack-server
       tag: "7.4.0"
 
-higress-console:
+aigateway-console:
+  enabled: true
   name: aigateway-console
   controller:
     serviceName: aigateway-controller
+  admin:
+    username: admin
+    displayName: Admin
+    password: admin
   service:
     type: LoadBalancer
   image:
     repository: aigateway/console
     tag: "2.1.0"
     pullPolicy: IfNotPresent
+  portalDatabase:
+    enabled: true
+    host: mysql-server
+
+aigateway-portal:
+  enabled: true
+  name: aigateway-portal
+  mysql:
+    enabled: false
+  database:
+    createSecret: false
+    host: mysql-server
+  image:
+    repository: aigateway/portal
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  service:
+    type: LoadBalancer
+    port: 8081
+  ingress:
+    enabled: false
+  session:
+    secretKey: change-me-session-secret

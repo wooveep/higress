@@ -22,7 +22,6 @@
 #include <unordered_set>
 
 #include "common/route_rule_matcher.h"
-#include "jwt-cpp/jwt.h"
 #define ASSERT(_X) assert(_X)
 
 #ifndef NULL_PLUGIN

@@ -26,6 +26,13 @@ global:
         tag: 2.9.4
 
 higress-core:
+  enabled: true
+  mysql:
+    mysql:
+      enabled: true
+      name: mysql-server
+      repository: aigateway/mariadb
+      tag: "11.4"
   mcpServer:
     enable: true
     sse_path_suffix: /sse
@@ -50,10 +57,15 @@ higress-core:
       repository: aigateway/redis-stack-server
       tag: "7.4.0"
 
-higress-console:
+aigateway-console:
+  enabled: true
   name: aigateway-console
   controller:
     serviceName: aigateway-controller
+  admin:
+    username: admin
+    displayName: Admin
+    password: admin
   image:
     repository: aigateway/console
     tag: "2.1.0"
@@ -64,3 +76,25 @@ higress-console:
     image:
       repository: aigateway
       tag: v1.11.0
+  portalDatabase:
+    enabled: true
+    host: mysql-server
+
+aigateway-portal:
+  enabled: true
+  name: aigateway-portal
+  mysql:
+    enabled: false
+  database:
+    createSecret: false
+    host: mysql-server
+  image:
+    repository: aigateway/portal
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  service:
+    port: 8081
+  ingress:
+    enabled: false
+  session:
+    secretKey: change-me-session-secret

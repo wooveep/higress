@@ -18,10 +18,12 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
+#include <random>
 #include <string>
-#include <system_error>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 
@@ -33,7 +35,7 @@
 #include "common/common_util.h"
 #include "common/http_util.h"
 #include "common/json_util.h"
-#include "uuid.h"
+#include "openssl/hmac.h"
 
 using ::nlohmann::json;
 using ::Wasm::Common::JsonArrayIterate;
@@ -63,6 +65,237 @@ const std::string& BearerPrefix = "Bearer ";
 const std::string& ClientCredentialsGrant = "client_credentials";
 constexpr uint32_t MaximumUriLength = 256;
 constexpr std::string_view kRcDetailOAuthPrefix = "oauth_access_denied";
+constexpr std::string_view kJwtAlg = "HS256";
+
+bool base64UrlEncode(std::string_view input, std::string* output) {
+  if (output == nullptr) {
+    return false;
+  }
+  static constexpr char kEncodeTable[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+  output->clear();
+  output->reserve((input.size() * 4 + 2) / 3);
+  uint32_t value = 0;
+  int valb = -6;
+  for (const uint8_t ch : input) {
+    value = (value << 8) | ch;
+    valb += 8;
+    while (valb >= 0) {
+      output->push_back(kEncodeTable[(value >> valb) & 0x3f]);
+      valb -= 6;
+    }
+  }
+  if (valb > -6) {
+    output->push_back(kEncodeTable[((value << 8) >> (valb + 8)) & 0x3f]);
+  }
+  return true;
+}
+
+bool base64UrlDecode(std::string_view input, std::string* output) {
+  if (output == nullptr) {
+    return false;
+  }
+  if (input.size() % 4 == 1) {
+    return false;
+  }
+  output->clear();
+  output->reserve((input.size() * 3) / 4);
+  uint32_t value = 0;
+  int valb = -8;
+  for (const uint8_t ch : input) {
+    if (ch == '=') {
+      break;
+    }
+    int8_t decoded = -1;
+    if (ch >= 'A' && ch <= 'Z') {
+      decoded = static_cast<int8_t>(ch - 'A');
+    } else if (ch >= 'a' && ch <= 'z') {
+      decoded = static_cast<int8_t>(ch - 'a' + 26);
+    } else if (ch >= '0' && ch <= '9') {
+      decoded = static_cast<int8_t>(ch - '0' + 52);
+    } else if (ch == '-') {
+      decoded = 62;
+    } else if (ch == '_') {
+      decoded = 63;
+    }
+    if (decoded < 0) {
+      return false;
+    }
+    value = (value << 6) | static_cast<uint32_t>(decoded);
+    valb += 6;
+    if (valb >= 0) {
+      output->push_back(static_cast<char>((value >> valb) & 0xff));
+      valb -= 8;
+    }
+  }
+  return true;
+}
+
+bool getJsonStringField(const json& src, std::string_view field,
+                        std::string* value) {
+  if (value == nullptr) {
+    return false;
+  }
+  auto field_json = src.find(std::string(field));
+  if (field_json == src.end() || !field_json->is_string()) {
+    return false;
+  }
+  *value = field_json->get<std::string>();
+  return true;
+}
+
+bool getJsonIntegerField(const json& src, std::string_view field,
+                         uint64_t* value) {
+  if (value == nullptr) {
+    return false;
+  }
+  auto field_json = src.find(std::string(field));
+  if (field_json == src.end()) {
+    return false;
+  }
+  if (field_json->is_number_unsigned()) {
+    *value = field_json->get<uint64_t>();
+    return true;
+  }
+  if (!field_json->is_number_integer()) {
+    return false;
+  }
+  auto int_value = field_json->get<int64_t>();
+  if (int_value < 0) {
+    return false;
+  }
+  *value = static_cast<uint64_t>(int_value);
+  return true;
+}
+
+bool constantTimeEquals(std::string_view lhs, std::string_view rhs) {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+  uint8_t diff = 0;
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    diff |= static_cast<uint8_t>(lhs[i] ^ rhs[i]);
+  }
+  return diff == 0;
+}
+
+bool signHs256(std::string_view key, std::string_view input,
+               std::string* signature) {
+  if (signature == nullptr) {
+    return false;
+  }
+  std::array<uint8_t, EVP_MAX_MD_SIZE> hmac{};
+  unsigned int length = 0;
+  auto* result = HMAC(EVP_sha256(), key.data(), static_cast<int>(key.size()),
+                      reinterpret_cast<const uint8_t*>(input.data()),
+                      input.size(), hmac.data(), &length);
+  if (result == nullptr || length == 0) {
+    return false;
+  }
+  signature->assign(reinterpret_cast<const char*>(hmac.data()), length);
+  return true;
+}
+
+bool addWithoutOverflow(uint64_t lhs, uint64_t rhs, uint64_t* value) {
+  if (value == nullptr) {
+    return false;
+  }
+  if (lhs > std::numeric_limits<uint64_t>::max() - rhs) {
+    *value = std::numeric_limits<uint64_t>::max();
+    return true;
+  }
+  *value = lhs + rhs;
+  return true;
+}
+
+bool splitToken(std::string_view token, std::array<std::string_view, 3>* parts) {
+  if (parts == nullptr) {
+    return false;
+  }
+  auto first_dot = token.find('.');
+  if (first_dot == std::string::npos) {
+    return false;
+  }
+  auto second_dot = token.find('.', first_dot + 1);
+  if (second_dot == std::string::npos || token.find('.', second_dot + 1) !=
+                                         std::string::npos) {
+    return false;
+  }
+  (*parts)[0] = token.substr(0, first_dot);
+  (*parts)[1] = token.substr(first_dot + 1, second_dot - first_dot - 1);
+  (*parts)[2] = token.substr(second_dot + 1);
+  return !(*parts)[0].empty() && !(*parts)[1].empty() && !(*parts)[2].empty();
+}
+
+bool parseJsonSegment(std::string_view encoded, json* out) {
+  if (out == nullptr) {
+    return false;
+  }
+  std::string decoded;
+  if (!base64UrlDecode(encoded, &decoded)) {
+    return false;
+  }
+  *out = json::parse(decoded, nullptr, false);
+  return out->is_object();
+}
+
+std::string toHex(uint8_t value) {
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string out(2, '0');
+  out[0] = kHex[(value >> 4) & 0x0f];
+  out[1] = kHex[value & 0x0f];
+  return out;
+}
+
+std::string generateUuidV4(std::mt19937* generator) {
+  if (generator == nullptr) {
+    return {};
+  }
+  std::uniform_int_distribution<int> dist(0, 255);
+  std::array<uint8_t, 16> bytes{};
+  for (auto& byte : bytes) {
+    byte = static_cast<uint8_t>(dist(*generator));
+  }
+  // RFC 4122 variant 1 + version 4.
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+  std::string uuid;
+  uuid.reserve(36);
+  for (size_t i = 0; i < bytes.size(); ++i) {
+    if (i == 4 || i == 6 || i == 8 || i == 10) {
+      uuid.push_back('-');
+    }
+    uuid.append(toHex(bytes[i]));
+  }
+  return uuid;
+}
+
+bool buildToken(std::string_view secret, const json& payload, std::string* token) {
+  if (token == nullptr) {
+    return false;
+  }
+  const json header = {{"alg", kJwtAlg}, {"typ", TypeHeader}};
+  std::string header_segment;
+  std::string payload_segment;
+  if (!base64UrlEncode(header.dump(), &header_segment) ||
+      !base64UrlEncode(payload.dump(), &payload_segment)) {
+    return false;
+  }
+  std::string signing_input = absl::StrCat(header_segment, ".", payload_segment);
+  std::string signature;
+  if (!signHs256(secret, signing_input, &signature)) {
+    return false;
+  }
+  std::string signature_segment;
+  if (!base64UrlEncode(signature, &signature_segment)) {
+    return false;
+  }
+  *token = absl::StrCat(signing_input, ".", signature_segment);
+  return true;
+}
+
 std::string generateRcDetails(std::string_view error_msg) {
   // Replace space with underscore since RCDetails may be written to access log.
   // Some log processors assume each log segment is separated by whitespace.
@@ -128,34 +361,37 @@ bool PluginRootContext::generateToken(const OAuthConfigRule& rule,
     *err_msg = "invalid client_id or client_secret";
     return false;
   }
-  auto jwt = jwt::create();
-  if (rule.global_credentials) {
-    jwt.set_audience(DefaultAudience);
-  } else {
-    jwt.set_audience(route_name);
-  }
-  it = params.find("scope");
-  if (it != params.end()) {
-    jwt.set_payload_claim("scope", jwt::claim(it->second));
-  }
   std::random_device rd;
   auto seed_data = std::array<int, std::mt19937::state_size>{};
   std::generate(std::begin(seed_data), std::end(seed_data), std::ref(rd));
   std::seed_seq seq(std::begin(seed_data), std::end(seed_data));
   std::mt19937 generator(seq);
-  uuids::uuid_random_generator gen{generator};
-  std::error_code ec;
-  *token = jwt.set_issuer(rule.issuer)
-               .set_type(TypeHeader)
-               .set_subject(consumer.name)
-               .set_issued_at(std::chrono::system_clock::now())
-               .set_expires_at(std::chrono::system_clock::now() +
-                               std::chrono::seconds{rule.token_ttl})
-               .set_payload_claim("client_id", jwt::claim(consumer.client_id))
-               .set_id(uuids::to_string(gen()))
-               .sign(jwt::algorithm::hs256{consumer.client_secret}, ec);
-  if (ec) {
-    *err_msg = absl::StrCat("jwt sign failed: %s", ec.message());
+  const auto now = std::chrono::system_clock::now();
+  const uint64_t now_seconds =
+      std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch())
+          .count();
+  uint64_t exp_seconds = 0;
+  if (!addWithoutOverflow(now_seconds, rule.token_ttl, &exp_seconds)) {
+    *err_msg = "jwt sign failed";
+    return false;
+  }
+
+  json payload = {{"iss", rule.issuer},
+                  {"sub", consumer.name},
+                  {"iat", now_seconds},
+                  {"exp", exp_seconds},
+                  {"client_id", consumer.client_id},
+                  {"jti", generateUuidV4(&generator)}};
+  payload["aud"] = rule.global_credentials ? json(DefaultAudience)
+                                           : json(route_name);
+
+  it = params.find("scope");
+  if (it != params.end()) {
+    payload["scope"] = it->second;
+  }
+
+  if (!buildToken(consumer.client_secret, payload, token)) {
+    *err_msg = "jwt sign failed";
     return false;
   }
   return true;
@@ -237,16 +473,6 @@ bool PluginRootContext::parsePluginConfig(const json& conf,
   return true;
 }
 
-#define CLAIM_CHECK(token, claim, type)                     \
-  if (!token.has_payload_claim(#claim)) {                   \
-    LOG_DEBUG("claim is missing: " #claim);                 \
-    goto failed;                                            \
-  }                                                         \
-  if (token.get_payload_claim(#claim).get_type() != type) { \
-    LOG_DEBUG("claim is invalid: " #claim);                 \
-    goto failed;                                            \
-  }
-
 bool PluginRootContext::checkPlugin(
     const OAuthConfigRule& rule,
     const std::optional<std::unordered_set<std::string>>& allow_set,
@@ -255,7 +481,7 @@ bool PluginRootContext::checkPlugin(
   bool verified = false;
   std::string token_str;
   {
-    size_t pos;
+    size_t pos = 0;
     if (auth_header.empty()) {
       LOG_DEBUG("auth header is empty");
       goto failed;
@@ -268,34 +494,100 @@ bool PluginRootContext::checkPlugin(
     auto start = pos + BearerPrefix.size();
     token_str =
         std::string{auth_header.c_str() + start, auth_header.size() - start};
-    auto token = jwt::decode(token_str);
-    CLAIM_CHECK(token, client_id, jwt::json::type::string);
-    CLAIM_CHECK(token, iss, jwt::json::type::string);
-    CLAIM_CHECK(token, sub, jwt::json::type::string);
-    CLAIM_CHECK(token, aud, jwt::json::type::string);
-    CLAIM_CHECK(token, exp, jwt::json::type::integer);
-    CLAIM_CHECK(token, iat, jwt::json::type::integer);
-    auto client_id = token.get_payload_claim("client_id").as_string();
+    std::array<std::string_view, 3> token_parts;
+    if (!splitToken(token_str, &token_parts)) {
+      LOG_DEBUG(absl::StrFormat("invalid token format, token:%s", token_str));
+      goto failed;
+    }
+
+    json header_json;
+    if (!parseJsonSegment(token_parts[0], &header_json)) {
+      LOG_DEBUG(absl::StrFormat("invalid token header, token:%s", token_str));
+      goto failed;
+    }
+
+    std::string alg;
+    if (!getJsonStringField(header_json, "alg", &alg) || alg != kJwtAlg) {
+      LOG_DEBUG(absl::StrFormat("invalid token alg, token:%s", token_str));
+      goto failed;
+    }
+    std::string typ;
+    if (!getJsonStringField(header_json, "typ", &typ) || typ != TypeHeader) {
+      LOG_DEBUG(absl::StrFormat("invalid token typ, token:%s", token_str));
+      goto failed;
+    }
+
+    json payload_json;
+    if (!parseJsonSegment(token_parts[1], &payload_json)) {
+      LOG_DEBUG(absl::StrFormat("invalid token payload, token:%s", token_str));
+      goto failed;
+    }
+
+    std::string client_id;
+    if (!getJsonStringField(payload_json, "client_id", &client_id)) {
+      LOG_DEBUG("claim is missing or invalid: client_id");
+      goto failed;
+    }
     auto it = rule.consumers.find(client_id);
     if (it == rule.consumers.end()) {
       LOG_DEBUG(absl::StrFormat("client_id not found:%s", client_id));
       goto failed;
     }
-    auto consumer = it->second;
-    auto verifier =
-        jwt::verify()
-            .allow_algorithm(jwt::algorithm::hs256{consumer.client_secret})
-            .with_issuer(rule.issuer)
-            .with_subject(consumer.name)
-            .with_type(TypeHeader)
-            .leeway(rule.clock_skew);
-    std::error_code ec;
-    verifier.verify(token, ec);
-    if (ec) {
+    const auto& consumer = it->second;
+
+    const std::string signing_input =
+        absl::StrCat(token_parts[0], ".", token_parts[1]);
+    std::string expected_signature;
+    if (!signHs256(consumer.client_secret, signing_input, &expected_signature)) {
       LOG_INFO(absl::StrFormat("token verify failed, token:%s, reason:%s",
-                               token_str, ec.message()));
+                               token_str, "sign failed"));
       goto failed;
     }
+    std::string expected_signature_segment;
+    if (!base64UrlEncode(expected_signature, &expected_signature_segment)) {
+      LOG_INFO(absl::StrFormat("token verify failed, token:%s, reason:%s",
+                               token_str, "base64 encode failed"));
+      goto failed;
+    }
+    if (!constantTimeEquals(expected_signature_segment, token_parts[2])) {
+      LOG_INFO(absl::StrFormat("token verify failed, token:%s, reason:%s",
+                               token_str, "signature invalid"));
+      goto failed;
+    }
+
+    std::string issuer;
+    std::string subject;
+    std::string audience;
+    uint64_t expire_at = 0;
+    uint64_t issued_at = 0;
+    if (!getJsonStringField(payload_json, "iss", &issuer) ||
+        !getJsonStringField(payload_json, "sub", &subject) ||
+        !getJsonStringField(payload_json, "aud", &audience) ||
+        !getJsonIntegerField(payload_json, "exp", &expire_at) ||
+        !getJsonIntegerField(payload_json, "iat", &issued_at)) {
+      LOG_DEBUG(absl::StrFormat("token required claim is invalid, token:%s",
+                                token_str));
+      goto failed;
+    }
+    if (issuer != rule.issuer || subject != consumer.name) {
+      LOG_INFO(absl::StrFormat("token verify failed, token:%s, reason:%s",
+                               token_str, "iss/sub mismatch"));
+      goto failed;
+    }
+
+    const uint64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+                             std::chrono::system_clock::now().time_since_epoch())
+                             .count();
+    uint64_t now_with_leeway = 0;
+    uint64_t expire_with_leeway = 0;
+    addWithoutOverflow(now, rule.clock_skew, &now_with_leeway);
+    addWithoutOverflow(expire_at, rule.clock_skew, &expire_with_leeway);
+    if (issued_at > now_with_leeway || now > expire_with_leeway) {
+      LOG_INFO(absl::StrFormat("token verify failed, token:%s, reason:%s",
+                               token_str, "time constraint"));
+      goto failed;
+    }
+
     verified = true;
     if (allow_set &&
         allow_set.value().find(consumer.name) == allow_set.value().end()) {
@@ -304,12 +596,6 @@ bool PluginRootContext::checkPlugin(
       goto failed;
     }
     if (!rule.global_credentials) {
-      auto audience_json = token.get_payload_claim("aud");
-      if (audience_json.get_type() != jwt::json::type::string) {
-        LOG_DEBUG(absl::StrFormat("invalid audience, token:%s", token_str));
-        goto failed;
-      }
-      auto audience = audience_json.as_string();
       if (audience != route_name) {
         LOG_DEBUG(absl::StrFormat("audience:%s not match this route:%s",
                                   audience, route_name));

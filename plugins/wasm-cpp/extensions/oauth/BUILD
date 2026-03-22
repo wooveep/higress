@@ -22,9 +22,6 @@ proxy_wasm_cc_binary(
         "plugin.h",
     ],
     deps = [
-
-        "@com_github_thalhammer_jwt_cpp//:lib",
-        "@com_github_mariusbancila_stduuid//:lib",
         "@com_google_absl//absl/container:btree",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
@@ -46,8 +43,6 @@ cc_library(
     ],
     copts = ["-DNULL_PLUGIN"],
     deps = [
-        "@com_github_thalhammer_jwt_cpp//:lib",
-        "@com_github_mariusbancila_stduuid//:lib",
         "@com_google_absl//absl/container:btree",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",

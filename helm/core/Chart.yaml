@@ -14,5 +14,9 @@ dependencies:
     name: redis
     repository: "file://../redis"
     version: 0.0.1
+  - condition: mysql.mysql.enabled
+    name: mysql
+    repository: "file://charts/mysql"
+    version: 8.0.0
 type: application
 version: 2.2.0

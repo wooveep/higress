@@ -5,5 +5,8 @@ dependencies:
 - name: higress-console
   repository: file://../../../higress-console/helm
   version: 2.1.0
-digest: sha256:cede190bbb4edb9f3420ee3413799b1f035ce51c89ff090654f476031f78eab6
-generated: "2026-03-17T17:55:25.677535996+08:00"
+- name: aigateway-portal
+  repository: file://../../../aigateway-portal/helm
+  version: 0.1.0
+digest: sha256:7c30d5a3979cdc704aecce27b1cf0593004f33180452708ac2ef982334cdf027
+generated: "2026-03-22T21:53:12.537310715+08:00"

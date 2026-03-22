@@ -1,0 +1,20 @@
+{{- if .Values.mysql.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "higress-core-mysql.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ include "higress-core-mysql.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: mysql
+      port: {{ include "higress-core-mysql.service.port" . | int }}
+      targetPort: mysql
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: {{ include "higress-core-mysql.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
