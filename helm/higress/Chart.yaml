@@ -17,11 +17,11 @@ dependencies:
 - name: higress-console
   alias: aigateway-console
   repository: "file://../../../higress-console/helm"
-  version: 2.1.0
+  version: 2.2.0
   condition: aigateway-console.enabled
 - name: aigateway-portal
   repository: "file://../../../aigateway-portal/helm"
-  version: 0.1.0
+  version: 0.2.0
   condition: aigateway-portal.enabled
 type: application
 version: 2.2.1

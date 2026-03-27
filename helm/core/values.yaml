@@ -501,6 +501,8 @@ gateway:
   httpPort: 80
   httpsPort: 443
   hostNetwork: false
+  hostPort:
+    enabled: false
 
   # -- Labels to apply to all resources
   labels: {}

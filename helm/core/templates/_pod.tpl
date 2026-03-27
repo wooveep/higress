@@ -147,21 +147,23 @@ template:
         - containerPort: 15090
           protocol: TCP
           name: http-envoy-prom
-        {{- if or .Values.global.local .Values.global.kind }}
         - containerPort: {{ .Values.gateway.httpPort }}
-          hostPort:  {{ .Values.gateway.httpPort }}
+          {{- if .Values.gateway.hostPort.enabled }}
+          hostPort: {{ .Values.gateway.httpPort }}
+          {{- end }}
           name: http
           protocol: TCP
-        - containerPort:  {{ .Values.gateway.httpsPort }}
-          hostPort:  {{ .Values.gateway.httpsPort }}
+        - containerPort: {{ .Values.gateway.httpsPort }}
+          {{- if .Values.gateway.hostPort.enabled }}
+          hostPort: {{ .Values.gateway.httpsPort }}
+          {{- end }}
           name: https
           protocol: TCP
-        {{- end }}
         readinessProbe:
           failureThreshold: {{ .Values.gateway.readinessFailureThreshold }}
           httpGet:
             path: /healthz/ready
-            port: 15021
+            port: {{ .Values.global.proxy.statusPort }}
             scheme: HTTP
           initialDelaySeconds: {{ .Values.gateway.readinessInitialDelaySeconds }}
           periodSeconds: {{ .Values.gateway.readinessPeriodSeconds }}

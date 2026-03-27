@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
@@ -21,7 +22,28 @@ import (
 )
 
 const (
-	pluginName = "ai-quota"
+	pluginName                   = "ai-quota"
+	QuotaUnitToken               = "token"
+	QuotaUnitAmount              = "amount"
+	defaultQuotaRedisPrefix      = "chat_quota:"
+	defaultBalanceKeyPrefix      = "billing:balance:"
+	defaultPriceKeyPrefix        = "billing:model-price:"
+	defaultUsageEventStream      = "billing:usage:stream"
+	defaultUsageEventDedupPrefix = "billing:usage:event:"
+	defaultUserPolicyKeyPrefix   = "billing:quota-policy:user:"
+	defaultKeyPolicyKeyPrefix    = "billing:quota-policy:key:"
+	defaultUserUsageKeyPrefix    = "billing:quota-usage:user:"
+	defaultKeyUsageKeyPrefix     = "billing:quota-usage:key:"
+	defaultQuotaNoopPrefix       = "billing:quota:noop:"
+	ctxKeyRequestModelPrice      = "request_model_price"
+	ctxKeyRequestModelName       = "request_model_name"
+	ctxKeyRequestAPIKeyID        = "request_api_key_id"
+	ctxKeyRequestID              = "request_id"
+	ctxKeyTraceID                = "trace_id"
+	ctxKeyRequestStartedAt       = "request_started_at"
+	ctxKeyRequestPath            = "request_path"
+	ctxKeyRequestKind            = "request_kind"
+	headerAPIKeyID               = "x-higress-api-key-id"
 )
 
 type ChatMode string
@@ -54,12 +76,17 @@ func init() {
 }
 
 type QuotaConfig struct {
-	redisInfo       RedisInfo         `yaml:"redis"`
-	RedisKeyPrefix  string            `yaml:"redis_key_prefix"`
-	AdminConsumer   string            `yaml:"admin_consumer"`
-	AdminPath       string            `yaml:"admin_path"`
-	credential2Name map[string]string `yaml:"-"`
-	redisClient     wrapper.RedisClient
+	redisInfo             RedisInfo         `yaml:"redis"`
+	QuotaUnit             string            `yaml:"quota_unit"`
+	RedisKeyPrefix        string            `yaml:"redis_key_prefix"`
+	BalanceKeyPrefix      string            `yaml:"balance_key_prefix"`
+	PriceKeyPrefix        string            `yaml:"price_key_prefix"`
+	UsageEventStream      string            `yaml:"usage_event_stream"`
+	UsageEventDedupPrefix string            `yaml:"usage_event_dedup_prefix"`
+	AdminConsumer         string            `yaml:"admin_consumer"`
+	AdminPath             string            `yaml:"admin_path"`
+	credential2Name       map[string]string `yaml:"-"`
+	redisClient           wrapper.RedisClient
 }
 
 type Consumer struct {
@@ -88,9 +115,29 @@ func parseConfig(json gjson.Result, config *QuotaConfig) error {
 		return errors.New("missing admin_consumer in config")
 	}
 	// Redis
+	config.QuotaUnit = strings.ToLower(strings.TrimSpace(json.Get("quota_unit").String()))
+	if config.QuotaUnit == "" {
+		config.QuotaUnit = QuotaUnitToken
+	}
 	config.RedisKeyPrefix = json.Get("redis_key_prefix").String()
 	if config.RedisKeyPrefix == "" {
-		config.RedisKeyPrefix = "chat_quota:"
+		config.RedisKeyPrefix = defaultQuotaRedisPrefix
+	}
+	config.BalanceKeyPrefix = json.Get("balance_key_prefix").String()
+	if config.BalanceKeyPrefix == "" && config.QuotaUnit == QuotaUnitAmount {
+		config.BalanceKeyPrefix = defaultBalanceKeyPrefix
+	}
+	config.PriceKeyPrefix = json.Get("price_key_prefix").String()
+	if config.PriceKeyPrefix == "" && config.QuotaUnit == QuotaUnitAmount {
+		config.PriceKeyPrefix = defaultPriceKeyPrefix
+	}
+	config.UsageEventStream = json.Get("usage_event_stream").String()
+	if config.UsageEventStream == "" && config.QuotaUnit == QuotaUnitAmount {
+		config.UsageEventStream = defaultUsageEventStream
+	}
+	config.UsageEventDedupPrefix = json.Get("usage_event_dedup_prefix").String()
+	if config.UsageEventDedupPrefix == "" && config.QuotaUnit == QuotaUnitAmount {
+		config.UsageEventDedupPrefix = defaultUsageEventDedupPrefix
 	}
 	redisConfig := json.Get("redis")
 	if !redisConfig.Exists() {
@@ -148,6 +195,24 @@ func onHttpRequestHeaders(context wrapper.HttpContext, config QuotaConfig) types
 	context.SetContext("chatMode", chatMode)
 	context.SetContext("adminMode", adminMode)
 	context.SetContext("consumer", consumer)
+	context.SetContext(ctxKeyRequestPath, path.Path)
+	context.SetContext(ctxKeyRequestKind, requestKindFromPath(path.Path))
+	context.SetContext(ctxKeyRequestStartedAt, time.Now().UTC().Format(time.RFC3339Nano))
+	requestID := firstNonEmptyString(
+		getRequestHeader("x-request-id"),
+		getPropertyString("x_request_id"),
+		fmt.Sprintf("%s-%d", consumer, time.Now().UnixNano()),
+	)
+	traceID := firstNonEmptyString(
+		getRequestHeader("traceparent"),
+		getRequestHeader("x-b3-traceid"),
+		requestID,
+	)
+	context.SetContext(ctxKeyRequestID, requestID)
+	context.SetContext(ctxKeyTraceID, traceID)
+	if apiKeyID, _ := proxywasm.GetHttpRequestHeader(headerAPIKeyID); strings.TrimSpace(apiKeyID) != "" {
+		context.SetContext(ctxKeyRequestAPIKeyID, strings.TrimSpace(apiKeyID))
+	}
 	log.Debugf("chatMode:%s, adminMode:%s, consumer:%s", chatMode, adminMode, consumer)
 	if chatMode == ChatModeNone {
 		return types.ActionContinue
@@ -162,6 +227,11 @@ func onHttpRequestHeaders(context wrapper.HttpContext, config QuotaConfig) types
 			return types.HeaderStopIteration
 		}
 		return types.ActionContinue
+	}
+
+	if config.QuotaUnit == QuotaUnitAmount {
+		context.BufferRequestBody()
+		return types.HeaderStopIteration
 	}
 
 	// there is no need to read request body when it is on chat completion mode
@@ -194,8 +264,18 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config QuotaConfig, body []byte)
 	if !ok {
 		return types.ActionContinue
 	}
-	if chatMode == ChatModeNone || chatMode == ChatModeCompletion {
+	if chatMode == ChatModeNone {
 		return types.ActionContinue
+	}
+	if chatMode == ChatModeCompletion {
+		if config.QuotaUnit != QuotaUnitAmount {
+			return types.ActionContinue
+		}
+		consumer, ok := ctx.GetContext("consumer").(string)
+		if !ok || consumer == "" {
+			return types.ActionContinue
+		}
+		return checkAmountQuota(ctx, config, consumer, body)
 	}
 	adminMode, ok := ctx.GetContext("adminMode").(AdminMode)
 	if !ok {
@@ -234,16 +314,42 @@ func onHttpStreamingResponseBody(ctx wrapper.HttpContext, config QuotaConfig, da
 		return data
 	}
 
-	if ctx.GetContext(tokenusage.CtxKeyInputToken) == nil || ctx.GetContext(tokenusage.CtxKeyOutputToken) == nil || ctx.GetContext("consumer") == nil {
+	if ctx.GetContext("consumer") == nil {
 		return data
 	}
 
-	inputToken := ctx.GetContext(tokenusage.CtxKeyInputToken).(int64)
-	outputToken := ctx.GetContext(tokenusage.CtxKeyOutputToken).(int64)
 	consumer := ctx.GetContext("consumer").(string)
-	totalToken := int(inputToken + outputToken)
+	statusCode := getResponseStatusCode()
+	modelName := resolveEventModelName(ctx)
+	if modelName == "" {
+		modelName = "unknown"
+	}
+
+	inputToken := int64(0)
+	outputToken := int64(0)
+	if value := ctx.GetContext(tokenusage.CtxKeyInputToken); value != nil {
+		inputToken = value.(int64)
+	}
+	if value := ctx.GetContext(tokenusage.CtxKeyOutputToken); value != nil {
+		outputToken = value.(int64)
+	}
+	totalToken := inputToken + outputToken
+	if config.QuotaUnit == QuotaUnitAmount {
+		if statusCode < 200 || statusCode >= 300 {
+			emitAmountAuditEvent(ctx, config, consumer, modelName, "failed", "missing", statusCode,
+				"upstream_failed", fmt.Sprintf("Upstream request finished with status %d.", statusCode))
+			return data
+		}
+		if inputToken <= 0 && outputToken <= 0 {
+			emitAmountAuditEvent(ctx, config, consumer, modelName, "success", "missing", statusCode,
+				"missing_usage", "Successful response did not expose billable usage.")
+			return data
+		}
+		emitAmountUsageEvent(ctx, config, consumer, modelName, inputToken, outputToken, totalToken, statusCode)
+		return data
+	}
 	log.Debugf("update consumer:%s, totalToken:%d", consumer, totalToken)
-	config.redisClient.DecrBy(config.RedisKeyPrefix+consumer, totalToken, nil)
+	config.redisClient.DecrBy(config.RedisKeyPrefix+consumer, int(totalToken), nil)
 	return data
 }
 
@@ -268,10 +374,40 @@ func getOperationMode(path string, adminPath string) (ChatMode, AdminMode) {
 	if strings.HasSuffix(path, fullAdminPath) {
 		return ChatModeAdmin, AdminModeQuery
 	}
-	if strings.HasSuffix(path, "/v1/chat/completions") {
+	if isSupportedAIPath(path) {
 		return ChatModeCompletion, AdminModeNone
 	}
 	return ChatModeNone, AdminModeNone
+}
+
+func isSupportedAIPath(path string) bool {
+	supported := []string{
+		"/v1/chat/completions",
+		"/v1/completions",
+		"/v1/responses",
+		"/v1/embeddings",
+	}
+	for _, item := range supported {
+		if strings.HasSuffix(path, item) {
+			return true
+		}
+	}
+	return false
+}
+
+func requestKindFromPath(path string) string {
+	switch {
+	case strings.HasSuffix(path, "/v1/chat/completions"):
+		return "chat.completions"
+	case strings.HasSuffix(path, "/v1/completions"):
+		return "completions"
+	case strings.HasSuffix(path, "/v1/responses"):
+		return "responses"
+	case strings.HasSuffix(path, "/v1/embeddings"):
+		return "embeddings"
+	default:
+		return "unknown"
+	}
 }
 
 func refreshQuota(ctx wrapper.HttpContext, config QuotaConfig, adminConsumer string, body string) types.Action {
@@ -287,13 +423,14 @@ func refreshQuota(ctx wrapper.HttpContext, config QuotaConfig, adminConsumer str
 		values[k] = v[0]
 	}
 	queryConsumer := values["consumer"]
-	quota, err := strconv.Atoi(values["quota"])
+	quota, err := strconv.ParseInt(values["quota"], 10, 64)
 	if queryConsumer == "" || err != nil {
 		util.SendResponse(http.StatusForbidden, "ai-quota.unauthorized", "text/plain", "Request denied by ai quota check. consumer can't be empty and quota must be integer.")
 		return types.ActionContinue
 	}
-	err2 := config.redisClient.Set(config.RedisKeyPrefix+queryConsumer, quota, func(response resp.Value) {
-		log.Debugf("Redis set key = %s quota = %d", config.RedisKeyPrefix+queryConsumer, quota)
+	key := quotaStorageKey(config, queryConsumer)
+	err2 := config.redisClient.Set(key, quota, func(response resp.Value) {
+		log.Debugf("Redis set key = %s quota = %d", key, quota)
 		if err := response.Error(); err != nil {
 			util.SendResponse(http.StatusServiceUnavailable, "ai-quota.error", "text/plain", fmt.Sprintf("redis error:%v", err))
 			return
@@ -326,19 +463,20 @@ func queryQuota(ctx wrapper.HttpContext, config QuotaConfig, adminConsumer strin
 		return types.ActionContinue
 	}
 	queryConsumer := values["consumer"]
-	err := config.redisClient.Get(config.RedisKeyPrefix+queryConsumer, func(response resp.Value) {
-		quota := 0
+	key := quotaStorageKey(config, queryConsumer)
+	err := config.redisClient.Get(key, func(response resp.Value) {
+		quota := int64(0)
 		if err := response.Error(); err != nil {
 			util.SendResponse(http.StatusServiceUnavailable, "ai-quota.error", "text/plain", fmt.Sprintf("redis error:%v", err))
 			return
 		} else if response.IsNull() {
 			quota = 0
 		} else {
-			quota = response.Integer()
+			quota = parseRespInteger(response)
 		}
 		result := struct {
 			Consumer string `json:"consumer"`
-			Quota    int    `json:"quota"`
+			Quota    int64  `json:"quota"`
 		}{
 			Consumer: queryConsumer,
 			Quota:    quota,
@@ -366,15 +504,16 @@ func deltaQuota(ctx wrapper.HttpContext, config QuotaConfig, adminConsumer strin
 		values[k] = v[0]
 	}
 	queryConsumer := values["consumer"]
-	value, err := strconv.Atoi(values["value"])
+	value, err := strconv.ParseInt(values["value"], 10, 64)
 	if queryConsumer == "" || err != nil {
 		util.SendResponse(http.StatusForbidden, "ai-quota.unauthorized", "text/plain", "Request denied by ai quota check. consumer can't be empty and value must be integer.")
 		return types.ActionContinue
 	}
+	key := quotaStorageKey(config, queryConsumer)
 
 	if value >= 0 {
-		err := config.redisClient.IncrBy(config.RedisKeyPrefix+queryConsumer, value, func(response resp.Value) {
-			log.Debugf("Redis Incr key = %s value = %d", config.RedisKeyPrefix+queryConsumer, value)
+		err := config.redisClient.Command([]interface{}{"incrby", key, value}, func(response resp.Value) {
+			log.Debugf("Redis Incr key = %s value = %d", key, value)
 			if err := response.Error(); err != nil {
 				util.SendResponse(http.StatusServiceUnavailable, "ai-quota.error", "text/plain", fmt.Sprintf("redis error:%v", err))
 				return
@@ -386,8 +525,8 @@ func deltaQuota(ctx wrapper.HttpContext, config QuotaConfig, adminConsumer strin
 			return types.ActionContinue
 		}
 	} else {
-		err := config.redisClient.DecrBy(config.RedisKeyPrefix+queryConsumer, 0-value, func(response resp.Value) {
-			log.Debugf("Redis Decr key = %s value = %d", config.RedisKeyPrefix+queryConsumer, 0-value)
+		err := config.redisClient.Command([]interface{}{"decrby", key, 0 - value}, func(response resp.Value) {
+			log.Debugf("Redis Decr key = %s value = %d", key, 0-value)
 			if err := response.Error(); err != nil {
 				util.SendResponse(http.StatusServiceUnavailable, "ai-quota.error", "text/plain", fmt.Sprintf("redis error:%v", err))
 				return
@@ -402,3 +541,585 @@ func deltaQuota(ctx wrapper.HttpContext, config QuotaConfig, adminConsumer strin
 
 	return types.ActionPause
 }
+
+type modelPrice struct {
+	ModelID      string
+	PriceVersion int64
+	InputPer1K   int64
+	OutputPer1K  int64
+}
+
+func quotaStorageKey(config QuotaConfig, consumer string) string {
+	if config.QuotaUnit == QuotaUnitAmount && config.BalanceKeyPrefix != "" {
+		return config.BalanceKeyPrefix + consumer
+	}
+	return config.RedisKeyPrefix + consumer
+}
+
+func checkAmountQuota(ctx wrapper.HttpContext, config QuotaConfig, consumer string, body []byte) types.Action {
+	modelName := extractRequestModel(body)
+	if modelName == "" {
+		emitAmountAuditEvent(ctx, config, consumer, "unknown", "rejected", "missing", http.StatusServiceUnavailable,
+			"model_missing", "Request denied by ai quota check. Request model is missing.")
+		util.SendResponse(http.StatusServiceUnavailable, "ai-quota.model_price_missing", "text/plain", "Request denied by ai quota check. Model pricing is unavailable.")
+		return types.ActionPause
+	}
+	ctx.SetContext(ctxKeyRequestModelName, modelName)
+	ctx.SetContext(tokenusage.CtxKeyRequestModel, modelName)
+
+	priceKey := config.PriceKeyPrefix + modelName
+	err := config.redisClient.Command([]interface{}{"hgetall", priceKey}, func(response resp.Value) {
+		price, ok := parseModelPriceResponse(modelName, response)
+		if err := response.Error(); err != nil {
+			_ = proxywasm.ResumeHttpRequest()
+			return
+		}
+		if !ok {
+			emitAmountAuditEvent(ctx, config, consumer, modelName, "rejected", "missing", http.StatusServiceUnavailable,
+				"model_price_missing", "Request denied by ai quota check. Model pricing is unavailable.")
+			util.SendResponse(http.StatusServiceUnavailable, "ai-quota.model_price_missing", "text/plain", "Request denied by ai quota check. Model pricing is unavailable.")
+			return
+		}
+		ctx.SetContext(ctxKeyRequestModelPrice, price)
+		if err := evaluateAmountAdmission(ctx, config, consumer, modelName); err != nil {
+			_ = proxywasm.ResumeHttpRequest()
+		}
+	})
+	if err != nil {
+		return types.ActionContinue
+	}
+	return types.ActionPause
+}
+
+func emitAmountUsageEvent(ctx wrapper.HttpContext, config QuotaConfig, consumer string, modelName string, inputToken, outputToken, totalToken int64, httpStatus int) {
+	if storedPrice, ok := ctx.GetContext(ctxKeyRequestModelPrice).(modelPrice); ok && normalizeModelName(storedPrice.ModelID) == modelName {
+		dispatchAmountCharge(ctx, config, consumer, modelName, storedPrice, inputToken, outputToken, totalToken, httpStatus)
+		return
+	}
+
+	priceKey := config.PriceKeyPrefix + modelName
+	_ = config.redisClient.Command([]interface{}{"hgetall", priceKey}, func(response resp.Value) {
+		price, ok := parseModelPriceResponse(modelName, response)
+		if err := response.Error(); err != nil || !ok {
+			emitAmountAuditEvent(ctx, config, consumer, modelName, "success", "missing", httpStatus,
+				"model_price_missing", "Successful response could not find model pricing.")
+			return
+		}
+		dispatchAmountCharge(ctx, config, consumer, modelName, price, inputToken, outputToken, totalToken, httpStatus)
+	})
+}
+
+func dispatchAmountCharge(ctx wrapper.HttpContext, config QuotaConfig, consumer string, modelName string, price modelPrice, inputToken, outputToken, totalToken int64, httpStatus int) {
+	cost := calculateAmountCost(inputToken, outputToken, price)
+	dispatchAmountEvent(ctx, config, amountEvent{
+		Consumer:      consumer,
+		ModelName:     modelName,
+		RequestStatus: "success",
+		UsageStatus:   "parsed",
+		HTTPStatus:    httpStatus,
+		InputToken:    inputToken,
+		OutputToken:   outputToken,
+		TotalToken:    totalToken,
+		Cost:          cost,
+		PriceVersion:  price.PriceVersion,
+	})
+}
+
+type amountEvent struct {
+	Consumer      string
+	ModelName     string
+	RequestStatus string
+	UsageStatus   string
+	HTTPStatus    int
+	ErrorCode     string
+	ErrorMessage  string
+	InputToken    int64
+	OutputToken   int64
+	TotalToken    int64
+	Cost          int64
+	PriceVersion  int64
+}
+
+func emitAmountAuditEvent(ctx wrapper.HttpContext, config QuotaConfig, consumer string, modelName string, requestStatus string, usageStatus string, httpStatus int, errorCode string, errorMessage string) {
+	dispatchAmountEvent(ctx, config, amountEvent{
+		Consumer:      consumer,
+		ModelName:     modelName,
+		RequestStatus: requestStatus,
+		UsageStatus:   usageStatus,
+		HTTPStatus:    httpStatus,
+		ErrorCode:     errorCode,
+		ErrorMessage:  errorMessage,
+	})
+}
+
+func dispatchAmountEvent(ctx wrapper.HttpContext, config QuotaConfig, event amountEvent) {
+	requestID := strings.TrimSpace(ctx.GetStringContext(ctxKeyRequestID, ""))
+	eventID := requestID
+	if eventID == "" {
+		eventID = fmt.Sprintf("%s-%d", event.Consumer, time.Now().UnixNano())
+	}
+	dedupKey := config.UsageEventDedupPrefix + eventID
+	keys := []interface{}{
+		quotaStorageKey(config, event.Consumer),
+		dedupKey,
+		config.UsageEventStream,
+		billingUsageKey(defaultUserUsageKeyPrefix, quotaWindowTotal, event.Consumer),
+		billingUsageKey(defaultUserUsageKeyPrefix, quotaWindowDaily, event.Consumer),
+		billingUsageKey(defaultUserUsageKeyPrefix, quotaWindowWeekly, event.Consumer),
+		billingUsageKey(defaultUserUsageKeyPrefix, quotaWindowMonthly, event.Consumer),
+		billingUsageKey(defaultKeyUsageKeyPrefix, quotaWindowTotal, firstNonEmptyString(ctx.GetStringContext(ctxKeyRequestAPIKeyID, ""), event.Consumer)),
+		billingUsageKey(defaultKeyUsageKeyPrefix, quotaWindowDaily, firstNonEmptyString(ctx.GetStringContext(ctxKeyRequestAPIKeyID, ""), event.Consumer)),
+		billingUsageKey(defaultKeyUsageKeyPrefix, quotaWindowWeekly, firstNonEmptyString(ctx.GetStringContext(ctxKeyRequestAPIKeyID, ""), event.Consumer)),
+		billingUsageKey(defaultKeyUsageKeyPrefix, quotaWindowMonthly, firstNonEmptyString(ctx.GetStringContext(ctxKeyRequestAPIKeyID, ""), event.Consumer)),
+	}
+	now := time.Now().UTC()
+	dailyTTL, weeklyTTL, monthlyTTL := amountWindowTTLSeconds(now)
+	args := buildAmountChargeArgs(
+		event.Cost,
+		eventID,
+		requestID,
+		strings.TrimSpace(ctx.GetStringContext(ctxKeyTraceID, "")),
+		event.Consumer,
+		getPropertyString("route_name"),
+		strings.TrimSpace(ctx.GetStringContext(ctxKeyRequestPath, "")),
+		strings.TrimSpace(ctx.GetStringContext(ctxKeyRequestKind, "")),
+		event.ModelName,
+		event.RequestStatus,
+		event.UsageStatus,
+		event.HTTPStatus,
+		event.ErrorCode,
+		event.ErrorMessage,
+		event.InputToken,
+		event.OutputToken,
+		event.TotalToken,
+		event.PriceVersion,
+		strings.TrimSpace(ctx.GetStringContext(ctxKeyRequestAPIKeyID, "")),
+		parseRFC3339Time(ctx.GetStringContext(ctxKeyRequestStartedAt, "")),
+		now,
+		now,
+		dailyTTL,
+		weeklyTTL,
+		monthlyTTL,
+	)
+	_ = config.redisClient.Eval(amountChargeScript, len(keys), keys, args, nil)
+}
+
+func buildAmountChargeArgs(cost int64, eventID, requestID, traceID, consumer, routeName, requestPath, requestKind, modelName, requestStatus, usageStatus string, httpStatus int, errorCode, errorMessage string, inputToken, outputToken, totalToken, priceVersion int64, apiKeyID string, startedAt time.Time, finishedAt time.Time, occurredAt time.Time, dailyTTL int64, weeklyTTL int64, monthlyTTL int64) []interface{} {
+	return []interface{}{
+		cost,
+		eventID,
+		requestID,
+		traceID,
+		consumer,
+		routeName,
+		requestPath,
+		requestKind,
+		modelName,
+		requestStatus,
+		usageStatus,
+		httpStatus,
+		errorCode,
+		errorMessage,
+		inputToken,
+		outputToken,
+		totalToken,
+		"",
+		"",
+		"",
+		priceVersion,
+		apiKeyID,
+		startedAt.Format(time.RFC3339Nano),
+		finishedAt.Format(time.RFC3339Nano),
+		occurredAt.Format(time.RFC3339Nano),
+		dailyTTL,
+		weeklyTTL,
+		monthlyTTL,
+	}
+}
+
+func calculateAmountCost(inputToken, outputToken int64, price modelPrice) int64 {
+	inputCost := roundTokenCost(inputToken, price.InputPer1K)
+	outputCost := roundTokenCost(outputToken, price.OutputPer1K)
+	return inputCost + outputCost
+}
+
+func roundTokenCost(tokens int64, microPer1K int64) int64 {
+	if tokens <= 0 || microPer1K <= 0 {
+		return 0
+	}
+	numerator := tokens * microPer1K
+	return (numerator + 500) / 1000
+}
+
+func parseModelPriceResponse(modelName string, response resp.Value) (modelPrice, bool) {
+	if response.IsNull() || response.Error() != nil {
+		return modelPrice{}, false
+	}
+	fields := response.Array()
+	if len(fields) < 2 {
+		return modelPrice{}, false
+	}
+	kv := make(map[string]string, len(fields)/2)
+	for i := 0; i+1 < len(fields); i += 2 {
+		kv[fields[i].String()] = fields[i+1].String()
+	}
+	inputPer1K, err := strconv.ParseInt(strings.TrimSpace(kv["input_price_per_1k_micro_yuan"]), 10, 64)
+	if err != nil {
+		return modelPrice{}, false
+	}
+	outputPer1K, err := strconv.ParseInt(strings.TrimSpace(kv["output_price_per_1k_micro_yuan"]), 10, 64)
+	if err != nil {
+		return modelPrice{}, false
+	}
+	priceVersion, _ := strconv.ParseInt(strings.TrimSpace(kv["price_version_id"]), 10, 64)
+	modelID := normalizeModelName(kv["model_id"])
+	if modelID == "" {
+		modelID = modelName
+	}
+	return modelPrice{
+		ModelID:      modelID,
+		PriceVersion: priceVersion,
+		InputPer1K:   inputPer1K,
+		OutputPer1K:  outputPer1K,
+	}, true
+}
+
+func parseRespInteger(value resp.Value) int64 {
+	raw := strings.TrimSpace(value.String())
+	if raw == "" {
+		return 0
+	}
+	parsed, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return parsed
+}
+
+func extractRequestModel(body []byte) string {
+	modelName := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	return normalizeModelName(modelName)
+}
+
+func normalizeModelName(modelName string) string {
+	normalized := strings.TrimSpace(modelName)
+	if normalized == "" || strings.EqualFold(normalized, tokenusage.ModelUnknown) {
+		return ""
+	}
+	return normalized
+}
+
+func resolveEventModelName(ctx wrapper.HttpContext) string {
+	modelName := ""
+	if model, ok := ctx.GetUserAttribute(tokenusage.CtxKeyModel).(string); ok {
+		modelName = normalizeModelName(model)
+	}
+	if modelName == "" {
+		modelName = normalizeModelName(ctx.GetStringContext(ctxKeyRequestModelName, ""))
+	}
+	return modelName
+}
+
+func getResponseStatusCode() int {
+	statusText, err := proxywasm.GetHttpResponseHeader(":status")
+	if err != nil {
+		return http.StatusOK
+	}
+	statusCode, parseErr := strconv.Atoi(strings.TrimSpace(statusText))
+	if parseErr != nil || statusCode <= 0 {
+		return http.StatusOK
+	}
+	return statusCode
+}
+
+func parseRFC3339Time(value string) time.Time {
+	if strings.TrimSpace(value) == "" {
+		return time.Now().UTC()
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Now().UTC()
+	}
+	return parsed
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func getRequestHeader(name string) string {
+	value, err := proxywasm.GetHttpRequestHeader(name)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
+func getPropertyString(key string) string {
+	raw, err := proxywasm.GetProperty([]string{key})
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+const (
+	quotaWindowTotal   = "total"
+	quotaWindow5h      = "5h"
+	quotaWindowDaily   = "daily"
+	quotaWindowWeekly  = "weekly"
+	quotaWindowMonthly = "monthly"
+)
+
+func evaluateAmountAdmission(ctx wrapper.HttpContext, config QuotaConfig, consumer string, modelName string) error {
+	apiKeyID := strings.TrimSpace(ctx.GetStringContext(ctxKeyRequestAPIKeyID, ""))
+	keys := buildAmountAdmissionKeys(config, consumer, apiKeyID)
+	return config.redisClient.Eval(amountAdmissionScript, len(keys), keys, []interface{}{apiKeyID}, func(response resp.Value) {
+		if err := response.Error(); err != nil {
+			_ = proxywasm.ResumeHttpRequest()
+			return
+		}
+		allowed, reason := parseAmountAdmissionResponse(response)
+		if allowed {
+			_ = proxywasm.ResumeHttpRequest()
+			return
+		}
+		emitAmountAuditEvent(ctx, config, consumer, modelName, "rejected", "missing", http.StatusForbidden,
+			reason, amountAdmissionMessage(reason))
+		util.SendResponse(http.StatusForbidden, "ai-quota.noquota", "text/plain", amountAdmissionMessage(reason))
+	})
+}
+
+func buildAmountAdmissionKeys(config QuotaConfig, consumer string, apiKeyID string) []interface{} {
+	apiKeyTarget := apiKeyID
+	if apiKeyTarget == "" {
+		apiKeyTarget = defaultQuotaNoopPrefix + consumer
+	}
+	return []interface{}{
+		quotaStorageKey(config, consumer),
+		defaultUserPolicyKeyPrefix + consumer,
+		defaultKeyPolicyKeyPrefix + apiKeyTarget,
+		billingUsageKey(defaultUserUsageKeyPrefix, quotaWindowTotal, consumer),
+		billingUsageKey(defaultUserUsageKeyPrefix, quotaWindow5h, consumer),
+		billingUsageKey(defaultUserUsageKeyPrefix, quotaWindowDaily, consumer),
+		billingUsageKey(defaultUserUsageKeyPrefix, quotaWindowWeekly, consumer),
+		billingUsageKey(defaultUserUsageKeyPrefix, quotaWindowMonthly, consumer),
+		billingUsageKey(defaultKeyUsageKeyPrefix, quotaWindowTotal, apiKeyTarget),
+		billingUsageKey(defaultKeyUsageKeyPrefix, quotaWindow5h, apiKeyTarget),
+		billingUsageKey(defaultKeyUsageKeyPrefix, quotaWindowDaily, apiKeyTarget),
+		billingUsageKey(defaultKeyUsageKeyPrefix, quotaWindowWeekly, apiKeyTarget),
+		billingUsageKey(defaultKeyUsageKeyPrefix, quotaWindowMonthly, apiKeyTarget),
+	}
+}
+
+func billingUsageKey(prefix string, window string, target string) string {
+	return prefix + window + ":" + target
+}
+
+func parseAmountAdmissionResponse(response resp.Value) (bool, string) {
+	fields := response.Array()
+	if len(fields) < 2 {
+		return true, "ok"
+	}
+	allowed := parseRespInteger(fields[0]) > 0
+	reason := strings.TrimSpace(fields[1].String())
+	if reason == "" {
+		reason = "ok"
+	}
+	return allowed, reason
+}
+
+func amountAdmissionMessage(reason string) string {
+	switch reason {
+	case "no_quota":
+		return "Request denied by ai quota check, No quota left"
+	case "key_total_limit_exceeded":
+		return "Request denied by ai quota check, API Key total quota exceeded"
+	case "user_total_limit_exceeded":
+		return "Request denied by ai quota check, User total quota exceeded"
+	case "key_5h_limit_exceeded":
+		return "Request denied by ai quota check, API Key 5h quota exceeded"
+	case "user_5h_limit_exceeded":
+		return "Request denied by ai quota check, User 5h quota exceeded"
+	case "key_daily_limit_exceeded":
+		return "Request denied by ai quota check, API Key daily quota exceeded"
+	case "user_daily_limit_exceeded":
+		return "Request denied by ai quota check, User daily quota exceeded"
+	case "key_weekly_limit_exceeded":
+		return "Request denied by ai quota check, API Key weekly quota exceeded"
+	case "user_weekly_limit_exceeded":
+		return "Request denied by ai quota check, User weekly quota exceeded"
+	case "key_monthly_limit_exceeded":
+		return "Request denied by ai quota check, API Key monthly quota exceeded"
+	case "user_monthly_limit_exceeded":
+		return "Request denied by ai quota check, User monthly quota exceeded"
+	default:
+		return "Request denied by ai quota check, Quota window exceeded"
+	}
+}
+
+func amountWindowTTLSeconds(now time.Time) (int64, int64, int64) {
+	location := time.FixedZone("Asia/Shanghai", 8*60*60)
+	localNow := now.In(location)
+	nextDay := time.Date(localNow.Year(), localNow.Month(), localNow.Day()+1, 0, 0, 0, 0, location)
+	weekStart := localNow.AddDate(0, 0, -((int(localNow.Weekday()) + 6) % 7))
+	nextWeek := time.Date(weekStart.Year(), weekStart.Month(), weekStart.Day(), 0, 0, 0, 0, location).AddDate(0, 0, 7)
+	nextMonth := time.Date(localNow.Year(), localNow.Month(), 1, 0, 0, 0, 0, location).AddDate(0, 1, 0)
+	return int64(nextDay.Sub(localNow).Seconds()),
+		int64(nextWeek.Sub(localNow).Seconds()),
+		int64(nextMonth.Sub(localNow).Seconds())
+}
+
+const amountChargeScript = `
+local balanceKey = KEYS[1]
+local dedupKey = KEYS[2]
+local streamKey = KEYS[3]
+local userTotalKey = KEYS[4]
+local userDailyKey = KEYS[5]
+local userWeeklyKey = KEYS[6]
+local userMonthlyKey = KEYS[7]
+local keyTotalKey = KEYS[8]
+local keyDailyKey = KEYS[9]
+local keyWeeklyKey = KEYS[10]
+local keyMonthlyKey = KEYS[11]
+local cost = tonumber(ARGV[1])
+if redis.call('SETNX', dedupKey, ARGV[2]) == 0 then
+  return {0, redis.call('GET', balanceKey) or '0'}
+end
+redis.call('EXPIRE', dedupKey, 86400)
+local requestStatus = ARGV[10]
+local usageStatus = ARGV[11]
+local apiKeyId = ARGV[22]
+local nextBalance = redis.call('GET', balanceKey) or '0'
+if cost and cost > 0 and requestStatus == 'success' and usageStatus == 'parsed' then
+  nextBalance = redis.call('DECRBY', balanceKey, cost)
+  redis.call('INCRBY', userTotalKey, cost)
+  redis.call('INCRBY', userDailyKey, cost)
+  redis.call('INCRBY', userWeeklyKey, cost)
+  redis.call('INCRBY', userMonthlyKey, cost)
+  local dailyTTL = tonumber(ARGV[26]) or 0
+  local weeklyTTL = tonumber(ARGV[27]) or 0
+  local monthlyTTL = tonumber(ARGV[28]) or 0
+  if dailyTTL > 0 then redis.call('EXPIRE', userDailyKey, dailyTTL) end
+  if weeklyTTL > 0 then redis.call('EXPIRE', userWeeklyKey, weeklyTTL) end
+  if monthlyTTL > 0 then redis.call('EXPIRE', userMonthlyKey, monthlyTTL) end
+  if apiKeyId ~= '' then
+    redis.call('INCRBY', keyTotalKey, cost)
+    redis.call('INCRBY', keyDailyKey, cost)
+    redis.call('INCRBY', keyWeeklyKey, cost)
+    redis.call('INCRBY', keyMonthlyKey, cost)
+    if dailyTTL > 0 then redis.call('EXPIRE', keyDailyKey, dailyTTL) end
+    if weeklyTTL > 0 then redis.call('EXPIRE', keyWeeklyKey, weeklyTTL) end
+    if monthlyTTL > 0 then redis.call('EXPIRE', keyMonthlyKey, monthlyTTL) end
+  end
+end
+redis.call('XADD', streamKey, '*',
+  'event_id', ARGV[2],
+  'request_id', ARGV[3],
+  'trace_id', ARGV[4],
+  'consumer_name', ARGV[5],
+  'route_name', ARGV[6],
+  'request_path', ARGV[7],
+  'request_kind', ARGV[8],
+  'model_id', ARGV[9],
+  'request_status', ARGV[10],
+  'usage_status', ARGV[11],
+  'http_status', ARGV[12],
+  'error_code', ARGV[13],
+  'error_message', ARGV[14],
+  'input_tokens', ARGV[15],
+  'output_tokens', ARGV[16],
+  'total_tokens', ARGV[17],
+  'input_token_details_json', ARGV[18],
+  'output_token_details_json', ARGV[19],
+  'provider_usage_json', ARGV[20],
+  'cost_micro_yuan', ARGV[1],
+  'price_version_id', ARGV[21],
+  'api_key_id', ARGV[22],
+  'started_at', ARGV[23],
+  'finished_at', ARGV[24],
+  'occurred_at', ARGV[25]
+)
+return {1, nextBalance}
+`
+
+const amountAdmissionScript = `
+local function intOrZero(value)
+  local parsed = tonumber(value)
+  if parsed == nil then
+    return 0
+  end
+  return parsed
+end
+
+local function exceeds(limitValue, currentValue)
+  return limitValue > 0 and currentValue >= limitValue
+end
+
+local balance = intOrZero(redis.call('GET', KEYS[1]))
+if balance <= 0 then
+  return {0, 'no_quota', balance}
+end
+
+local userLimits = redis.call('HMGET', KEYS[2],
+  'limit_total_micro_yuan',
+  'limit_5h_micro_yuan',
+  'limit_daily_micro_yuan',
+  'limit_weekly_micro_yuan',
+  'limit_monthly_micro_yuan')
+local keyLimits = redis.call('HMGET', KEYS[3],
+  'limit_total_micro_yuan',
+  'limit_5h_micro_yuan',
+  'limit_daily_micro_yuan',
+  'limit_weekly_micro_yuan',
+  'limit_monthly_micro_yuan')
+
+local userTotal = intOrZero(redis.call('GET', KEYS[4]))
+local user5h = intOrZero(redis.call('GET', KEYS[5]))
+local userDaily = intOrZero(redis.call('GET', KEYS[6]))
+local userWeekly = intOrZero(redis.call('GET', KEYS[7]))
+local userMonthly = intOrZero(redis.call('GET', KEYS[8]))
+local keyTotal = intOrZero(redis.call('GET', KEYS[9]))
+local key5h = intOrZero(redis.call('GET', KEYS[10]))
+local keyDaily = intOrZero(redis.call('GET', KEYS[11]))
+local keyWeekly = intOrZero(redis.call('GET', KEYS[12]))
+local keyMonthly = intOrZero(redis.call('GET', KEYS[13]))
+
+local hasKeyPolicy = ARGV[1] ~= ''
+if hasKeyPolicy and exceeds(intOrZero(keyLimits[1]), keyTotal) then
+  return {0, 'key_total_limit_exceeded', balance}
+end
+if exceeds(intOrZero(userLimits[1]), userTotal) then
+  return {0, 'user_total_limit_exceeded', balance}
+end
+if hasKeyPolicy and exceeds(intOrZero(keyLimits[2]), key5h) then
+  return {0, 'key_5h_limit_exceeded', balance}
+end
+if exceeds(intOrZero(userLimits[2]), user5h) then
+  return {0, 'user_5h_limit_exceeded', balance}
+end
+if hasKeyPolicy and exceeds(intOrZero(keyLimits[3]), keyDaily) then
+  return {0, 'key_daily_limit_exceeded', balance}
+end
+if exceeds(intOrZero(userLimits[3]), userDaily) then
+  return {0, 'user_daily_limit_exceeded', balance}
+end
+if hasKeyPolicy and exceeds(intOrZero(keyLimits[4]), keyWeekly) then
+  return {0, 'key_weekly_limit_exceeded', balance}
+end
+if exceeds(intOrZero(userLimits[4]), userWeekly) then
+  return {0, 'user_weekly_limit_exceeded', balance}
+end
+if hasKeyPolicy and exceeds(intOrZero(keyLimits[5]), keyMonthly) then
+  return {0, 'key_monthly_limit_exceeded', balance}
+end
+if exceeds(intOrZero(userLimits[5]), userMonthly) then
+  return {0, 'user_monthly_limit_exceeded', balance}
+end
+return {1, 'ok', balance}
+`

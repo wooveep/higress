@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
@@ -55,6 +56,12 @@ type Consumer struct {
 	// @Description en-US The credential of the consumer.
 	// @Scope GLOBAL
 	Credential string `yaml:"credential"`
+
+	// @Title API Key ID
+	// @Title en-US API Key ID
+	// @Description API Key 的平台唯一标识，用于下游统计回填。
+	// @Description en-US The platform unique API key identifier used by downstream usage sync.
+	KeyID string `yaml:"key_id,omitempty"`
 }
 
 // @Name key-auth
@@ -127,15 +134,17 @@ type KeyAuthConfig struct {
 	// @Description en-US Consumers to be allowed for matched requests.
 	allow []string `yaml:"allow"`
 
-	credential2Name map[string]string `yaml:"-"`
+	credential2Consumer map[string]Consumer `yaml:"-"`
 }
+
+const apiKeyIDHeader = "X-Higress-Api-Key-Id"
 
 func parseGlobalConfig(json gjson.Result, global *KeyAuthConfig, log log.Log) error {
 	log.Debug("global config")
 
 	// init
 	ruleSet = false
-	global.credential2Name = make(map[string]string)
+	global.credential2Consumer = make(map[string]Consumer)
 
 	// global_auth
 	globalAuth := json.Get("global_auth")
@@ -189,16 +198,17 @@ func parseGlobalConfig(json gjson.Result, global *KeyAuthConfig, log log.Log) er
 		if !credential.Exists() || credential.String() == "" {
 			return errors.New("consumer credential is required")
 		}
-		if _, ok := global.credential2Name[credential.String()]; ok {
+		if _, ok := global.credential2Consumer[credential.String()]; ok {
 			return errors.New("duplicate consumer credential: " + credential.String())
 		}
 
 		consumer := Consumer{
 			Name:       name.String(),
 			Credential: credential.String(),
+			KeyID:      item.Get("key_id").String(),
 		}
 		global.consumers = append(global.consumers, consumer)
-		global.credential2Name[credential.String()] = name.String()
+		global.credential2Consumer[credential.String()] = consumer
 	}
 	return nil
 }
@@ -258,24 +268,31 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config KeyAuthConfig, log log
 	// - 从 query 中获取 tokens 信息
 	var tokens []string
 	if config.InHeader {
-		// 匹配keys中的 keyname
 		for _, key := range config.Keys {
 			value, err := proxywasm.GetHttpRequestHeader(key)
 			if err == nil && value != "" {
-				tokens = append(tokens, value)
+				if normalized := normalizeCredential(key, value, true); normalized != "" {
+					tokens = append(tokens, normalized)
+				}
 			}
 		}
-	} else if config.InQuery {
+	}
+	if config.InQuery {
 		requestUrl, _ := proxywasm.GetHttpRequestHeader(":path")
 		url, _ := url.Parse(requestUrl)
 		queryValues := url.Query()
 		for _, key := range config.Keys {
 			values, ok := queryValues[key]
 			if ok && len(values) > 0 {
-				tokens = append(tokens, values...)
+				for _, value := range values {
+					if normalized := normalizeCredential(key, value, false); normalized != "" {
+						tokens = append(tokens, normalized)
+					}
+				}
 			}
 		}
 	}
+	tokens = uniqueTokens(tokens)
 
 	// header/query
 	if len(tokens) > 1 {
@@ -285,13 +302,17 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config KeyAuthConfig, log log
 	}
 
 	// 验证token
-	name, ok := config.credential2Name[tokens[0]]
+	consumer, ok := config.credential2Consumer[tokens[0]]
 	if !ok {
 		log.Warnf("credential %q is not configured", tokens[0])
 		return deniedUnauthorizedConsumer()
 	}
+	name := consumer.Name
 
 	proxywasm.AddHttpRequestHeader("X-Mse-Consumer", name)
+	if consumer.KeyID != "" {
+		proxywasm.AddHttpRequestHeader(apiKeyIDHeader, consumer.KeyID)
+	}
 
 	// 全局生效：
 	// - global_auth == true 且 当前 domain/route 未配置该插件
@@ -361,4 +382,36 @@ func WWWAuthenticateHeader(realm string) [][2]string {
 	return [][2]string{
 		{"WWW-Authenticate", fmt.Sprintf("Key realm=%s", realm)},
 	}
+}
+
+func normalizeCredential(key string, value string, fromHeader bool) string {
+	normalized := strings.TrimSpace(value)
+	if normalized == "" {
+		return ""
+	}
+	if fromHeader && strings.EqualFold(strings.TrimSpace(key), "Authorization") {
+		if strings.HasPrefix(strings.ToLower(normalized), "bearer ") {
+			return strings.TrimSpace(normalized[7:])
+		}
+	}
+	return normalized
+}
+
+func uniqueTokens(values []string) []string {
+	if len(values) <= 1 {
+		return values
+	}
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }

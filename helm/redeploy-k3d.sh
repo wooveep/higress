@@ -17,12 +17,18 @@ CHART_DIR="${CHART_DIR:-${DEFAULT_CHART_DIR}}"
 if [[ -d "${CHART_DIR}" ]]; then
   CHART_DIR="$(cd -- "${CHART_DIR}" && pwd -P)"
 fi
-VALUES_FILE="${VALUES_FILE:-${CHART_DIR}/values-local-minikube.yaml}"
+
+DEFAULT_VALUES_FILE="${CHART_DIR}/values-production-k3d.yaml"
+if [[ ! -f "${DEFAULT_VALUES_FILE}" ]]; then
+  DEFAULT_VALUES_FILE="${CHART_DIR}/values-production-gray.yaml"
+fi
+
+VALUES_FILE="${VALUES_FILE:-${DEFAULT_VALUES_FILE}}"
 NAMESPACE="${NAMESPACE:-aigateway-system}"
 RELEASE_NAME="${RELEASE_NAME:-aigateway}"
 BUILD_COMPONENTS="${BUILD_COMPONENTS:-aigateway,controller,gateway,pilot,console,portal,plugin-server}"
 HELM_TIMEOUT="${HELM_TIMEOUT:-15m}"
-MINIKUBE_PROFILE="${MINIKUBE_PROFILE:-}"
+K3D_CLUSTER="${K3D_CLUSTER:-}"
 
 SKIP_BUILD=false
 SKIP_LOAD=false
@@ -31,22 +37,22 @@ SKIP_DEPLOY=false
 usage() {
   cat <<'USAGE'
 Usage:
-  redeploy-minikube.sh [options]
+  redeploy-k3d.sh [options]
 
 Options:
-  --values <path>         Helm values file (default: higress/helm/higress/values-local-minikube.yaml)
+  --values <path>         Helm values file (default: higress/helm/higress/values-production-k3d.yaml)
   --namespace <name>      Kubernetes namespace (default: aigateway-system)
   --release <name>        Helm release name (default: aigateway)
   --components <list>     Components passed to build-local-images.sh
   --timeout <duration>    Helm/kubectl rollout timeout (default: 15m)
-  --profile <name>        Minikube profile name (default: current profile)
+  --cluster <name>        k3d cluster name (default: inferred from current kubectl context)
   --skip-build            Skip local image build
-  --skip-load             Skip minikube image load
+  --skip-load             Skip k3d image import
   --skip-deploy           Skip helm upgrade + rollout restart
   -h, --help              Show this help
 
 Environment overrides:
-  CHART_DIR, VALUES_FILE, NAMESPACE, RELEASE_NAME, BUILD_COMPONENTS, HELM_TIMEOUT, MINIKUBE_PROFILE
+  CHART_DIR, VALUES_FILE, NAMESPACE, RELEASE_NAME, BUILD_COMPONENTS, HELM_TIMEOUT, K3D_CLUSTER
 USAGE
 }
 
@@ -72,8 +78,8 @@ while [[ $# -gt 0 ]]; do
       HELM_TIMEOUT="$2"
       shift 2
       ;;
-    --profile)
-      MINIKUBE_PROFILE="$2"
+    --cluster)
+      K3D_CLUSTER="$2"
       shift 2
       ;;
     --skip-build)
@@ -107,29 +113,62 @@ need_cmd() {
   fi
 }
 
-need_cmd docker
-need_cmd helm
-need_cmd kubectl
-need_cmd minikube
-need_cmd python3
+run() {
+  echo "+ $*"
+  "$@"
+}
 
-if [[ ! -f "${VALUES_FILE}" ]]; then
-  echo "Values file not found: ${VALUES_FILE}" >&2
+resolve_k3d_cluster() {
+  local context inferred
+
+  if [[ -n "${K3D_CLUSTER}" ]]; then
+    return
+  fi
+
+  context="$(kubectl config current-context 2>/dev/null || true)"
+  if [[ "${context}" == k3d-* ]]; then
+    K3D_CLUSTER="${context#k3d-}"
+    return
+  fi
+
+  inferred="$(
+    k3d cluster list -o json 2>/dev/null | python3 -c '
+import json
+import sys
+
+try:
+    clusters = json.load(sys.stdin)
+except Exception:
+    print("")
+    raise SystemExit(0)
+
+names = [item.get("name", "").strip() for item in clusters if isinstance(item, dict)]
+names = [name for name in names if name]
+
+print(names[0] if len(names) == 1 else "")
+'
+  )"
+
+  if [[ -n "${inferred}" ]]; then
+    K3D_CLUSTER="${inferred}"
+    return
+  fi
+
+  echo "Unable to infer k3d cluster. Please provide --cluster <name>." >&2
   exit 1
-fi
+}
 
-if [[ ! -d "${CHART_DIR}" ]]; then
-  echo "Chart directory not found: ${CHART_DIR}" >&2
-  exit 1
-fi
+verify_context_matches_cluster() {
+  local current expected
+  current="$(kubectl config current-context 2>/dev/null || true)"
+  expected="k3d-${K3D_CLUSTER}"
 
-echo "Using chart dir  : ${CHART_DIR}"
-echo "Using values file: ${VALUES_FILE}"
-
-MINIKUBE_ARGS=()
-if [[ -n "${MINIKUBE_PROFILE}" ]]; then
-  MINIKUBE_ARGS=(-p "${MINIKUBE_PROFILE}")
-fi
+  if [[ "${current}" != "${expected}" ]]; then
+    echo "kubectl context mismatch: current='${current}', expected='${expected}'." >&2
+    echo "Please run: kubectl config use-context ${expected}" >&2
+    exit 1
+  fi
+}
 
 declare -A FALLBACK_IMAGE_REPO=(
   ["aigateway/grafana"]="grafana/grafana"
@@ -137,11 +176,6 @@ declare -A FALLBACK_IMAGE_REPO=(
   ["aigateway/loki"]="grafana/loki"
   ["aigateway/promtail"]="grafana/promtail"
 )
-
-run() {
-  echo "+ $*"
-  "$@"
-}
 
 resolve_images() {
   python3 - "${VALUES_FILE}" <<'PY'
@@ -165,6 +199,7 @@ def get(data, *keys, default=None):
 def add(images, repository, tag):
     if repository and tag:
         images.add(f"{repository}:{tag}")
+
 
 images = set()
 
@@ -221,8 +256,31 @@ ensure_local_image() {
   run docker tag "${fallback_image}" "${image}"
 }
 
+need_cmd docker
+need_cmd helm
+need_cmd kubectl
+need_cmd k3d
+need_cmd python3
+
+if [[ ! -f "${VALUES_FILE}" ]]; then
+  echo "Values file not found: ${VALUES_FILE}" >&2
+  exit 1
+fi
+
+if [[ ! -d "${CHART_DIR}" ]]; then
+  echo "Chart directory not found: ${CHART_DIR}" >&2
+  exit 1
+fi
+
+resolve_k3d_cluster
+verify_context_matches_cluster
+
+echo "Using chart dir  : ${CHART_DIR}"
+echo "Using values file: ${VALUES_FILE}"
+echo "Using k3d cluster: ${K3D_CLUSTER}"
+
 if [[ "${SKIP_BUILD}" != "true" ]]; then
-  run "${SCRIPT_DIR}/build-local-images.sh" --components "${BUILD_COMPONENTS}"
+  run env WRAPPER_VALUES_FILE="${VALUES_FILE}" "${SCRIPT_DIR}/build-local-images.sh" --components "${BUILD_COMPONENTS}"
 fi
 
 if [[ "${SKIP_LOAD}" != "true" ]]; then
@@ -232,10 +290,10 @@ if [[ "${SKIP_LOAD}" != "true" ]]; then
     exit 1
   fi
 
-  echo "Loading images into minikube (${#IMAGES[@]} images)..."
+  echo "Importing images into k3d (${#IMAGES[@]} images)..."
   for image in "${IMAGES[@]}"; do
     ensure_local_image "${image}"
-    run minikube "${MINIKUBE_ARGS[@]}" image load --overwrite=true "${image}"
+    run k3d image import "${image}" -c "${K3D_CLUSTER}"
   done
 fi
 
@@ -269,7 +327,8 @@ if [[ "${SKIP_DEPLOY}" != "true" ]]; then
   fi
 fi
 
-echo "Redeploy complete."
+echo "k3d redeploy complete."
 echo "  release   : ${RELEASE_NAME}"
 echo "  namespace : ${NAMESPACE}"
 echo "  values    : ${VALUES_FILE}"
+echo "  cluster   : ${K3D_CLUSTER}"

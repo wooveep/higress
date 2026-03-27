@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 	"github.com/higress-group/wasm-go/pkg/test"
@@ -30,6 +31,23 @@ var basicConfig = func() json.RawMessage {
 		"admin_consumer":   "admin",
 		"redis_key_prefix": "chat_quota:",
 		"admin_path":       "/quota",
+		"redis": map[string]interface{}{
+			"service_name": "redis.static",
+			"service_port": 6379,
+			"timeout":      1000,
+			"database":     0,
+		},
+	})
+	return data
+}()
+
+var amountConfig = func() json.RawMessage {
+	data, _ := json.Marshal(map[string]interface{}{
+		"admin_consumer":     "admin",
+		"quota_unit":         "amount",
+		"balance_key_prefix": "billing:balance:",
+		"price_key_prefix":   "billing:model-price:",
+		"usage_event_stream": "billing:usage:stream",
 		"redis": map[string]interface{}{
 			"service_name": "redis.static",
 			"service_port": 6379,
@@ -73,6 +91,18 @@ func TestParseConfig(t *testing.T) {
 			host, status := test.NewTestHost(missingAdminConsumerConfig)
 			defer host.Reset()
 			require.Equal(t, types.OnPluginStartStatusFailed, status)
+		})
+
+		t.Run("amount config", func(t *testing.T) {
+			host, status := test.NewTestHost(amountConfig)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+			config, err := host.GetMatchConfig()
+			require.NoError(t, err)
+			quotaConfig := config.(*QuotaConfig)
+			require.Equal(t, QuotaUnitAmount, quotaConfig.QuotaUnit)
+			require.Equal(t, "billing:balance:", quotaConfig.BalanceKeyPrefix)
+			require.Equal(t, "billing:model-price:", quotaConfig.PriceKeyPrefix)
 		})
 	})
 }
@@ -147,6 +177,21 @@ func TestOnHttpRequestHeaders(t *testing.T) {
 			// 无consumer应该返回ActionContinue
 			require.Equal(t, types.ActionContinue, action)
 		})
+
+		t.Run("amount mode should buffer request body", func(t *testing.T) {
+			host, status := test.NewTestHost(amountConfig)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			action := host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+				{":path", "/v1/chat/completions"},
+				{":method", "POST"},
+				{"x-mse-consumer", "consumer1"},
+			})
+
+			require.Equal(t, types.HeaderStopIteration, action)
+		})
 	})
 }
 
@@ -203,6 +248,67 @@ func TestOnHttpRequestBody(t *testing.T) {
 
 			// 聊天完成模式应该返回ActionContinue
 			require.Equal(t, types.ActionContinue, action)
+		})
+
+		t.Run("amount mode", func(t *testing.T) {
+			host, status := test.NewTestHost(amountConfig)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			action := host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+				{":path", "/v1/chat/completions"},
+				{":method", "POST"},
+				{"x-mse-consumer", "consumer1"},
+			})
+			require.Equal(t, types.HeaderStopIteration, action)
+
+			action = host.CallOnHttpRequestBody([]byte(`{"model":"qwen-plus","messages":[{"role":"user","content":"hello"}]}`))
+			require.Equal(t, types.ActionPause, action)
+
+			host.CallOnRedisCall(0, test.CreateRedisRespArray([]interface{}{
+				"model_id", "qwen-plus",
+				"price_version_id", "1",
+				"input_price_per_1k_micro_yuan", "1000",
+				"output_price_per_1k_micro_yuan", "2000",
+			}))
+			host.CallOnRedisCall(0, test.CreateRedisRespArray([]interface{}{1, "ok", 1000000}))
+
+			action = host.GetHttpStreamAction()
+			require.Equal(t, types.ActionContinue, action)
+			host.CompleteHttp()
+		})
+
+		t.Run("amount mode denied by user daily window", func(t *testing.T) {
+			host, status := test.NewTestHost(amountConfig)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			action := host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+				{":path", "/v1/chat/completions"},
+				{":method", "POST"},
+				{"x-mse-consumer", "consumer1"},
+				{"x-higress-api-key-id", "KEY123"},
+			})
+			require.Equal(t, types.HeaderStopIteration, action)
+
+			action = host.CallOnHttpRequestBody([]byte(`{"model":"qwen-plus","messages":[{"role":"user","content":"hello"}]}`))
+			require.Equal(t, types.ActionPause, action)
+
+			host.CallOnRedisCall(0, test.CreateRedisRespArray([]interface{}{
+				"model_id", "qwen-plus",
+				"price_version_id", "1",
+				"input_price_per_1k_micro_yuan", "1000",
+				"output_price_per_1k_micro_yuan", "2000",
+			}))
+			host.CallOnRedisCall(0, test.CreateRedisRespArray([]interface{}{0, "user_daily_limit_exceeded", 1000000}))
+
+			response := host.GetLocalResponse()
+			require.NotNil(t, response)
+			require.Equal(t, uint32(http.StatusForbidden), response.StatusCode)
+			require.Contains(t, string(response.Data), "User daily quota exceeded")
+			host.CompleteHttp()
 		})
 	})
 }
@@ -325,4 +431,49 @@ func TestGetOperationMode(t *testing.T) {
 			require.Equal(t, tt.adminMode, adminMode)
 		})
 	}
+}
+
+func TestBuildAmountChargeArgs(t *testing.T) {
+	startedAt := time.Date(2026, time.March, 25, 10, 0, 0, 0, time.UTC)
+	finishedAt := time.Date(2026, time.March, 25, 10, 29, 59, 0, time.UTC)
+	occurredAt := time.Date(2026, time.March, 25, 10, 30, 0, 0, time.UTC)
+	args := buildAmountChargeArgs(
+		308,
+		"evt-1",
+		"req-1",
+		"trace-1",
+		"consumer1",
+		"route-a",
+		"/v1/chat/completions",
+		"chat.completions",
+		"qwen-plus",
+		"success",
+		"parsed",
+		200,
+		"",
+		"",
+		120,
+		130,
+		250,
+		9,
+		"KEY123",
+		startedAt,
+		finishedAt,
+		occurredAt,
+		3600,
+		7200,
+		10800,
+	)
+
+	require.Len(t, args, 28)
+	require.Equal(t, int64(308), args[0])
+	require.Equal(t, "trace-1", args[3])
+	require.Equal(t, "success", args[9])
+	require.Equal(t, "KEY123", args[21])
+	require.Equal(t, startedAt.Format(time.RFC3339Nano), args[22])
+	require.Equal(t, finishedAt.Format(time.RFC3339Nano), args[23])
+	require.Equal(t, occurredAt.Format(time.RFC3339Nano), args[24])
+	require.Equal(t, int64(3600), args[25])
+	require.Equal(t, int64(7200), args[26])
+	require.Equal(t, int64(10800), args[27])
 }

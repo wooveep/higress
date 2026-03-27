@@ -8,7 +8,10 @@ spec:
   defaultConfigDisable: true
   matchRules:
   - config:
-      redis_key_prefix: "chat_quota:"
+      quota_unit: amount
+      balance_key_prefix: "billing:balance:"
+      price_key_prefix: "billing:model-price:"
+      usage_event_stream: "billing:usage:stream"
       admin_consumer: consumer3
       admin_path: /quota
       redis:
@@ -20,7 +23,7 @@ spec:
     - qwen
   phase: UNSPECIFIED_PHASE
   priority: 280
-  url: oci://registry.cn-hangzhou.aliyuncs.com/2456868764/ai-quota:1.0.8
+  url: oci://registry.cn-hangzhou.aliyuncs.com/2456868764/ai-quota:1.1.0
 
 ---
 apiVersion: extensions.higress.io/v1alpha1

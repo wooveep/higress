@@ -30,6 +30,7 @@ var basicKeyAuthConfig = func() json.RawMessage {
 			{
 				"name":       "consumer1",
 				"credential": "token1",
+				"key_id":     "KEY123",
 			},
 			{
 				"name":       "consumer2",
@@ -51,6 +52,7 @@ var globalAuthFalseConfig = func() json.RawMessage {
 			{
 				"name":       "consumer1",
 				"credential": "token1",
+				"key_id":     "KEY123",
 			},
 		},
 		"keys":        []string{"x-api-key"},
@@ -68,6 +70,7 @@ var queryKeyConfig = func() json.RawMessage {
 			{
 				"name":       "consumer1",
 				"credential": "token1",
+				"key_id":     "KEY123",
 			},
 		},
 		"keys":        []string{"apikey"},
@@ -410,13 +413,17 @@ func TestOnHTTPRequestHeaders(t *testing.T) {
 			// 验证是否添加了 X-Mse-Consumer 头
 			headers := host.GetRequestHeaders()
 			consumerHeaderFound := false
+			apiKeyHeaderFound := false
 			for _, header := range headers {
 				if header[0] == "x-mse-consumer" && header[1] == "consumer1" {
 					consumerHeaderFound = true
-					break
+				}
+				if header[0] == "x-higress-api-key-id" && header[1] == "KEY123" {
+					apiKeyHeaderFound = true
 				}
 			}
 			require.True(t, consumerHeaderFound, "X-Mse-Consumer header should be added")
+			require.True(t, apiKeyHeaderFound, "X-Higress-Api-Key-Id header should be added")
 
 			host.CompleteHttp()
 		})

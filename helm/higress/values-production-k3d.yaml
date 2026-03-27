@@ -1,9 +1,12 @@
+# Production values for k3d deployment.
+# This profile keeps production-grade component choices while enabling
+# observability and portal metrics linkage by default.
+
 global:
+  local: false
   ingressClass: aigateway
-  local: true
   enableRedis: true
-  enablePluginServer: true
-  onlyPushRouteCluster: false
+  imagePullPolicy: IfNotPresent
   o11y:
     enabled: true
     grafana:
@@ -22,7 +25,6 @@ global:
       image:
         repository: aigateway/promtail
         tag: 2.9.4
-  imagePullPolicy: IfNotPresent
 
 higress-core:
   enabled: true
@@ -40,7 +42,6 @@ higress-core:
     match_list: []
     servers: []
   gateway:
-    name: aigateway-gateway
     repository: aigateway/gateway
     tag: "2.2.0-dev-20260327030541"
     service:
@@ -48,20 +49,16 @@ higress-core:
     hostPort:
       enabled: false
   controller:
-    name: aigateway-controller
     repository: aigateway/controller
     tag: "2.2.0-dev-20260327030541"
   pilot:
     repository: aigateway/pilot
     tag: "2.2.0-dev-20260327030541"
   pluginServer:
-    name: aigateway-plugin-server
-    replicas: 1
     repository: aigateway/plugin-server
     tag: "1.0.0-dev-20260327030541"
   redis:
     redis:
-      name: redis-stack-server
       repository: aigateway/redis-stack-server
       tag: "7.4.0"
 
@@ -81,6 +78,12 @@ aigateway-console:
     repository: aigateway/console
     tag: "2.2.0-dev-20260327030541"
     pullPolicy: IfNotPresent
+  pluginServer:
+    serviceName: aigateway-plugin-server
+  certmanager:
+    image:
+      repository: aigateway
+      tag: v1.11.0
   portalDatabase:
     enabled: true
     host: mysql-server
@@ -92,6 +95,11 @@ aigateway-portal:
     enabled: false
   backend:
     corePrometheusURL: "http://aigateway-console-prometheus:9090/prometheus"
+    usageSyncEnabled: true
+    usageSyncSeconds: 300
+    keyAuthSyncEnabled: true
+    keyAuthSyncSeconds: 2
+    rechargeFallbackAvgCostPer1K: 0.02
   database:
     createSecret: false
     host: mysql-server

@@ -4,11 +4,21 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 HIGRESS_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+ROOT_DIR="$(cd -- "${HIGRESS_DIR}/.." && pwd)"
 CONSOLE_DIR="${CONSOLE_DIR:-$(cd -- "${HIGRESS_DIR}/../higress-console" && pwd)}"
 PLUGIN_SERVER_DIR="${PLUGIN_SERVER_DIR:-$(cd -- "${HIGRESS_DIR}/../plugin-server" && pwd)}"
 PORTAL_DIR="${PORTAL_DIR:-${HIGRESS_DIR}/../aigateway-portal}"
 
-WRAPPER_VALUES_FILE="${WRAPPER_VALUES_FILE:-${SCRIPT_DIR}/higress/values-production-gray.yaml}"
+# Prefer the wrapper values colocated with this script (higress/helm/higress).
+# Fall back to the legacy monorepo-level helm path when needed.
+if [[ -f "${SCRIPT_DIR}/higress/values-production-gray.yaml" ]]; then
+  DEFAULT_WRAPPER_VALUES_FILE="${SCRIPT_DIR}/higress/values-production-gray.yaml"
+elif [[ -f "${ROOT_DIR}/helm/higress/values-production-gray.yaml" ]]; then
+  DEFAULT_WRAPPER_VALUES_FILE="${ROOT_DIR}/helm/higress/values-production-gray.yaml"
+else
+  DEFAULT_WRAPPER_VALUES_FILE="${SCRIPT_DIR}/higress/values-production-gray.yaml"
+fi
+WRAPPER_VALUES_FILE="${WRAPPER_VALUES_FILE:-${DEFAULT_WRAPPER_VALUES_FILE}}"
 CORE_VALUES_FILE="${CORE_VALUES_FILE:-${SCRIPT_DIR}/core/values-production-gray.yaml}"
 CONSOLE_VALUES_FILE="${CONSOLE_VALUES_FILE:-${CONSOLE_DIR}/helm/values-production-gray.yaml}"
 
@@ -49,10 +59,10 @@ Examples:
   ./helm/build-local-images.sh --components aigateway,controller,gateway,console,portal,plugins,plugin-server
 
 Environment overrides:
-  WRAPPER_VALUES_FILE           Parent chart values file. Default: helm/higress/values-production-gray.yaml
+  WRAPPER_VALUES_FILE           Parent chart values file. Default: higress/helm/higress/values-production-gray.yaml
   CORE_VALUES_FILE              higress-core values file. Default: helm/core/values-production-gray.yaml
-  CONSOLE_VALUES_FILE           higress-console values file. Default: ../higress-console/helm/values-production-gray.yaml
-  CONSOLE_DIR                   Path to the higress-console repo. Default: ../higress-console
+  CONSOLE_VALUES_FILE           aigateway-console values file. Default: ../higress-console/helm/values-production-gray.yaml
+  CONSOLE_DIR                   Path to the aigateway-console repo. Default: ../higress-console
   PORTAL_DIR                    Path to the aigateway-portal repo. Default: ../aigateway-portal
   PLUGIN_SERVER_DIR             Path to the plugin-server repo. Default: ../plugin-server
   ARCH                          Target architecture. Default: amd64
@@ -240,7 +250,7 @@ need_cmd tar
 need_cmd file
 need_cmd go
 
-eval "$(
+if ! PARSED_IMAGE_VALUES="$(
 python3 - "${WRAPPER_VALUES_FILE}" "${CORE_VALUES_FILE}" "${CONSOLE_VALUES_FILE}" <<'PY'
 import shlex
 import sys
@@ -263,6 +273,12 @@ def get(data, *path):
         cur = cur.get(key)
     return "" if cur is None else cur
 
+def coalesce(*values):
+    for value in values:
+        if value != "":
+            return value
+    return ""
+
 values = {
     "AIGATEWAY_REPOSITORY": get(console, "certmanager", "image", "repository"),
     "AIGATEWAY_TAG": get(console, "certmanager", "image", "tag"),
@@ -274,15 +290,21 @@ values = {
     "PILOT_TAG": get(wrapper, "higress-core", "pilot", "tag"),
     "PLUGIN_SERVER_REPOSITORY": get(wrapper, "higress-core", "pluginServer", "repository"),
     "PLUGIN_SERVER_TAG": get(wrapper, "higress-core", "pluginServer", "tag"),
-    "CONSOLE_REPOSITORY": get(wrapper, "higress-console", "image", "repository"),
-    "CONSOLE_TAG": get(wrapper, "higress-console", "image", "tag"),
-    "PORTAL_BACKEND_REPOSITORY": get(wrapper, "aigateway-portal", "backend", "image", "repository"),
-    "PORTAL_BACKEND_TAG": get(wrapper, "aigateway-portal", "backend", "image", "tag"),
+    "CONSOLE_REPOSITORY": get(wrapper, "aigateway-console", "image", "repository"),
+    "CONSOLE_TAG": get(wrapper, "aigateway-console", "image", "tag"),
+    "PORTAL_BACKEND_REPOSITORY": coalesce(
+        get(wrapper, "aigateway-portal", "backend", "image", "repository"),
+        get(wrapper, "aigateway-portal", "image", "repository"),
+    ),
+    "PORTAL_BACKEND_TAG": coalesce(
+        get(wrapper, "aigateway-portal", "backend", "image", "tag"),
+        get(wrapper, "aigateway-portal", "image", "tag"),
+    ),
 }
 
 checks = [
-    ("certmanager.image.repository", values["AIGATEWAY_REPOSITORY"], get(wrapper, "higress-console", "certmanager", "image", "repository")),
-    ("certmanager.image.tag", values["AIGATEWAY_TAG"], get(wrapper, "higress-console", "certmanager", "image", "tag")),
+    ("certmanager.image.repository", values["AIGATEWAY_REPOSITORY"], get(wrapper, "aigateway-console", "certmanager", "image", "repository")),
+    ("certmanager.image.tag", values["AIGATEWAY_TAG"], get(wrapper, "aigateway-console", "certmanager", "image", "tag")),
     ("controller.repository", values["CONTROLLER_REPOSITORY"], get(core, "controller", "repository")),
     ("controller.tag", values["CONTROLLER_TAG"], get(core, "controller", "tag")),
     ("gateway.repository", values["GATEWAY_REPOSITORY"], get(core, "gateway", "repository")),
@@ -314,7 +336,12 @@ if errors:
 for key, value in values.items():
     print(f"{key}={shlex.quote(str(value))}")
 PY
-)"
+)"; then
+  echo "Failed to resolve image tags from values files. Please fix the mismatch above and retry." >&2
+  exit 1
+fi
+
+eval "${PARSED_IMAGE_VALUES}"
 
 HIGRESS_BASE_VERSION="${HIGRESS_BASE_VERSION:-$(resolve_makefile_export HIGRESS_BASE_VERSION || true)}"
 if [[ -z "${HIGRESS_BASE_VERSION}" ]]; then
@@ -344,6 +371,7 @@ echo "  envoy package    : ${ENVOY_PACKAGE_URL_PATTERN}"
 echo "  plugin output    : ${LOCAL_PLUGIN_OUTPUT_DIR}"
 echo "  plugin layouts   : ${LOCAL_PLUGIN_LAYOUT_ROOT}"
 echo "  plugin-server dir: ${PLUGIN_SERVER_DIR}"
+echo "  console dir      : ${CONSOLE_DIR}"
 echo "  portal dir       : ${PORTAL_DIR}"
 
 echo "Resolved image tags:"
@@ -426,6 +454,10 @@ build_pilot() {
 
 build_console() {
   local target_image="${CONSOLE_REPOSITORY}:${CONSOLE_TAG}"
+
+  # Force a fresh frontend bundle to avoid stale static artifacts in the image.
+  run rm -rf "${CONSOLE_DIR}/frontend/.ice" "${CONSOLE_DIR}/frontend/build"
+  run rm -rf "${CONSOLE_DIR}/backend/console/src/main/resources/static"
 
   run_in_dir "${CONSOLE_DIR}/backend" \
     env IMAGE_NAME="${target_image}" VERSION="${CONSOLE_TAG}" ./build.sh
