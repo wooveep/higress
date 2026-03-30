@@ -20,7 +20,7 @@ fi
 VALUES_FILE="${VALUES_FILE:-${CHART_DIR}/values-local-minikube.yaml}"
 NAMESPACE="${NAMESPACE:-aigateway-system}"
 RELEASE_NAME="${RELEASE_NAME:-aigateway}"
-BUILD_COMPONENTS="${BUILD_COMPONENTS:-aigateway,controller,gateway,pilot,console,portal,plugin-server}"
+BUILD_COMPONENTS="${BUILD_COMPONENTS:-aigateway,controller,gateway,pilot,console,portal,plugins,plugin-server}"
 HELM_TIMEOUT="${HELM_TIMEOUT:-15m}"
 MINIKUBE_PROFILE="${MINIKUBE_PROFILE:-}"
 
@@ -143,6 +143,33 @@ run() {
   "$@"
 }
 
+force_remove_minikube_image() {
+  local image="$1"
+  local cleanup_cmd
+
+  cleanup_cmd=$(
+    python3 - "${image}" <<'PY'
+import shlex
+import sys
+
+image = sys.argv[1]
+quoted = shlex.quote(image)
+
+print(
+    "if command -v docker >/dev/null 2>&1; then "
+    f"docker image rm -f {quoted} >/dev/null 2>&1 || true; "
+    "elif command -v nerdctl >/dev/null 2>&1; then "
+    f"nerdctl --namespace k8s.io image rm -f {quoted} >/dev/null 2>&1 || true; "
+    "elif command -v crictl >/dev/null 2>&1; then "
+    f"crictl rmi {quoted} >/dev/null 2>&1 || true; "
+    "fi"
+)
+PY
+  )
+
+  run minikube "${MINIKUBE_ARGS[@]}" ssh -- "${cleanup_cmd}"
+}
+
 resolve_images() {
   python3 - "${VALUES_FILE}" <<'PY'
 import sys
@@ -235,6 +262,7 @@ if [[ "${SKIP_LOAD}" != "true" ]]; then
   echo "Loading images into minikube (${#IMAGES[@]} images)..."
   for image in "${IMAGES[@]}"; do
     ensure_local_image "${image}"
+    force_remove_minikube_image "${image}"
     run minikube "${MINIKUBE_ARGS[@]}" image load --overwrite=true "${image}"
   done
 fi
@@ -249,11 +277,11 @@ if [[ "${SKIP_DEPLOY}" != "true" ]]; then
     --wait \
     --timeout "${HELM_TIMEOUT}"
 
-  DEPLOYMENTS="$(kubectl -n "${NAMESPACE}" get deploy -l "app.kubernetes.io/instance=${RELEASE_NAME}" -o name || true)"
-  STATEFULSETS="$(kubectl -n "${NAMESPACE}" get statefulset -l "app.kubernetes.io/instance=${RELEASE_NAME}" -o name || true)"
+  DEPLOYMENTS="$(kubectl -n "${NAMESPACE}" get deploy -l "app.kubernetes.io/managed-by=Helm" -o name || true)"
+  STATEFULSETS="$(kubectl -n "${NAMESPACE}" get statefulset -l "app.kubernetes.io/managed-by=Helm" -o name || true)"
 
   if [[ -n "${DEPLOYMENTS}" ]]; then
-    run kubectl -n "${NAMESPACE}" rollout restart deploy -l "app.kubernetes.io/instance=${RELEASE_NAME}"
+    run kubectl -n "${NAMESPACE}" rollout restart deploy -l "app.kubernetes.io/managed-by=Helm"
     while IFS= read -r item; do
       [[ -z "${item}" ]] && continue
       run kubectl -n "${NAMESPACE}" rollout status "${item}" --timeout "${HELM_TIMEOUT}"
@@ -261,7 +289,7 @@ if [[ "${SKIP_DEPLOY}" != "true" ]]; then
   fi
 
   if [[ -n "${STATEFULSETS}" ]]; then
-    run kubectl -n "${NAMESPACE}" rollout restart statefulset -l "app.kubernetes.io/instance=${RELEASE_NAME}"
+    run kubectl -n "${NAMESPACE}" rollout restart statefulset -l "app.kubernetes.io/managed-by=Helm"
     while IFS= read -r item; do
       [[ -z "${item}" ]] && continue
       run kubectl -n "${NAMESPACE}" rollout status "${item}" --timeout "${HELM_TIMEOUT}"

@@ -26,7 +26,7 @@ fi
 VALUES_FILE="${VALUES_FILE:-${DEFAULT_VALUES_FILE}}"
 NAMESPACE="${NAMESPACE:-aigateway-system}"
 RELEASE_NAME="${RELEASE_NAME:-aigateway}"
-BUILD_COMPONENTS="${BUILD_COMPONENTS:-aigateway,controller,gateway,pilot,console,portal,plugin-server}"
+BUILD_COMPONENTS="${BUILD_COMPONENTS:-aigateway,controller,gateway,pilot,console,portal,plugins,plugin-server}"
 HELM_TIMEOUT="${HELM_TIMEOUT:-15m}"
 K3D_CLUSTER="${K3D_CLUSTER:-}"
 
@@ -307,11 +307,11 @@ if [[ "${SKIP_DEPLOY}" != "true" ]]; then
     --wait \
     --timeout "${HELM_TIMEOUT}"
 
-  DEPLOYMENTS="$(kubectl -n "${NAMESPACE}" get deploy -l "app.kubernetes.io/instance=${RELEASE_NAME}" -o name || true)"
-  STATEFULSETS="$(kubectl -n "${NAMESPACE}" get statefulset -l "app.kubernetes.io/instance=${RELEASE_NAME}" -o name || true)"
+  DEPLOYMENTS="$(kubectl -n "${NAMESPACE}" get deploy -l "app.kubernetes.io/managed-by=Helm" -o name || true)"
+  STATEFULSETS="$(kubectl -n "${NAMESPACE}" get statefulset -l "app.kubernetes.io/managed-by=Helm" -o name || true)"
 
   if [[ -n "${DEPLOYMENTS}" ]]; then
-    run kubectl -n "${NAMESPACE}" rollout restart deploy -l "app.kubernetes.io/instance=${RELEASE_NAME}"
+    run kubectl -n "${NAMESPACE}" rollout restart deploy -l "app.kubernetes.io/managed-by=Helm"
     while IFS= read -r item; do
       [[ -z "${item}" ]] && continue
       run kubectl -n "${NAMESPACE}" rollout status "${item}" --timeout "${HELM_TIMEOUT}"
@@ -319,7 +319,7 @@ if [[ "${SKIP_DEPLOY}" != "true" ]]; then
   fi
 
   if [[ -n "${STATEFULSETS}" ]]; then
-    run kubectl -n "${NAMESPACE}" rollout restart statefulset -l "app.kubernetes.io/instance=${RELEASE_NAME}"
+    run kubectl -n "${NAMESPACE}" rollout restart statefulset -l "app.kubernetes.io/managed-by=Helm"
     while IFS= read -r item; do
       [[ -z "${item}" ]] && continue
       run kubectl -n "${NAMESPACE}" rollout status "${item}" --timeout "${HELM_TIMEOUT}"

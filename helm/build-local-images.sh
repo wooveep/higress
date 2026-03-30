@@ -25,6 +25,8 @@ CONSOLE_VALUES_FILE="${CONSOLE_VALUES_FILE:-${CONSOLE_DIR}/helm/values-productio
 CONSOLE_PLUGIN_PROPERTIES_FILE="${CONSOLE_PLUGIN_PROPERTIES_FILE:-${CONSOLE_DIR}/backend/sdk/src/main/resources/plugins/plugins.properties}"
 PLUGIN_SERVER_PROPERTIES_FILE="${PLUGIN_SERVER_PROPERTIES_FILE:-${PLUGIN_SERVER_DIR}/plugins.properties}"
 CONSOLE_PLUGIN_RESOURCE_DIR="${CONSOLE_PLUGIN_RESOURCE_DIR:-${CONSOLE_DIR}/backend/sdk/src/main/resources/plugins}"
+SYNC_PLUGIN_VERSIONS_SCRIPT="${SYNC_PLUGIN_VERSIONS_SCRIPT:-${SCRIPT_DIR}/sync-plugin-versions.py}"
+FORCE_SOURCE_VERSION_PLUGINS="${FORCE_SOURCE_VERSION_PLUGINS:-ai-quota}"
 
 LOCAL_PLUGIN_OUTPUT_DIR="${LOCAL_PLUGIN_OUTPUT_DIR:-${HIGRESS_DIR}/out/local-wasm-plugins}"
 LOCAL_PLUGIN_LAYOUT_ROOT="${LOCAL_PLUGIN_LAYOUT_ROOT:-${LOCAL_PLUGIN_OUTPUT_DIR}/oci-layouts}"
@@ -40,6 +42,7 @@ PLUGIN_BUILD_PLAN_FILE=""
 PLUGIN_LAYOUT_REF_FILE=""
 PLUGINS_BUILT=false
 ISTIO_CACHE_VOLUMES_PREPARED=false
+PLUGIN_VERSIONS_SYNCED=false
 
 cleanup() {
   if [[ -n "${PLUGIN_BUILD_PLAN_FILE}" && -f "${PLUGIN_BUILD_PLAN_FILE}" ]]; then
@@ -231,6 +234,11 @@ for file in "${WRAPPER_VALUES_FILE}" "${CORE_VALUES_FILE}" "${CONSOLE_VALUES_FIL
   fi
 done
 
+if [[ ! -f "${SYNC_PLUGIN_VERSIONS_SCRIPT}" ]]; then
+  echo "Required file not found: ${SYNC_PLUGIN_VERSIONS_SCRIPT}" >&2
+  exit 1
+fi
+
 for dir in "${CONSOLE_DIR}" "${PLUGIN_SERVER_DIR}" "${CONSOLE_PLUGIN_RESOURCE_DIR}"; do
   if [[ ! -d "${dir}" ]]; then
     echo "Required directory not found: ${dir}" >&2
@@ -249,6 +257,34 @@ need_cmd python3
 need_cmd tar
 need_cmd file
 need_cmd go
+
+sync_plugin_versions() {
+  local cmd=(
+    python3
+    "${SYNC_PLUGIN_VERSIONS_SCRIPT}"
+    --higress-dir "${HIGRESS_DIR}"
+    --console-plugin-properties-file "${CONSOLE_PLUGIN_PROPERTIES_FILE}"
+    --plugin-server-properties-file "${PLUGIN_SERVER_PROPERTIES_FILE}"
+    --console-plugin-resource-dir "${CONSOLE_PLUGIN_RESOURCE_DIR}"
+    --force-source-version-plugins "${FORCE_SOURCE_VERSION_PLUGINS}"
+  )
+
+  if [[ "${PLUGIN_VERSIONS_SYNCED}" == "true" ]]; then
+    return
+  fi
+
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    cmd+=(--dry-run)
+  fi
+
+  echo "+ ${cmd[*]}"
+  "${cmd[@]}"
+  PLUGIN_VERSIONS_SYNCED=true
+}
+
+if has_component "console" || has_component "plugins" || has_component "plugin-server"; then
+  sync_plugin_versions
+fi
 
 if ! PARSED_IMAGE_VALUES="$(
 python3 - "${WRAPPER_VALUES_FILE}" "${CORE_VALUES_FILE}" "${CONSOLE_VALUES_FILE}" <<'PY'
