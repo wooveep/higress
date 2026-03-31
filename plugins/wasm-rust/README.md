@@ -62,7 +62,7 @@ make build PLUGIN_NAME=say-hello PLUGIN_VERSION=1.0.0
 
 **重要提示**：
 
-- 某些插件（如 `ai-data-masking`）依赖 C 库，可能需要额外的配置才能成功构建
+- 某些插件在特定版本下可能依赖额外的本地工具链；当前 `ai-data-masking` 已可直接通过 `cargo check` 构建
 - 建议先使用简单的插件（如 `say-hello`）测试构建环境
 - 构建成功后会生成 `extensions/<plugin-name>/plugin.wasm` 文件
 

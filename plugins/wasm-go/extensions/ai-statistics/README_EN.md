@@ -10,8 +10,10 @@ Provides basic AI observability capabilities, including metric, log, and trace. 
 
 ## Runtime Properties
 
-Plugin Phase: `CUSTOM`
-Plugin Priority: `200`
+Plugin Phase: `Stats Phase`
+Plugin Priority: `900`
+
+Recommended order: run after `model-router` and before `ai-data-masking` so model routing is settled before request behavior is recorded.
 
 ## Configuration instructions
 
