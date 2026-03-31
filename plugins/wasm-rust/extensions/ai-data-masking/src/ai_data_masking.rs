@@ -661,64 +661,82 @@ impl AiDataMasking {
     }
 
     fn replace_request_msg(&mut self, message: &str) -> String {
-        let config = match &self.config {
-            Some(config) => config,
+        let replace_rules = match &self.config {
+            Some(config) => config.replace_rules.clone(),
             None => return message.to_string(),
         };
         let mut msg = message.to_string();
-        for rule in &config.replace_rules {
-            let mut replace_pair = Vec::new();
-            if rule.type_ == ReplaceType::Replace && !rule.restore {
-                msg = rule.regex.replace_all(&msg, &rule.value).to_string();
-            } else {
-                for matched in rule.regex.find_iter(&msg) {
-                    if matched.is_err() {
-                        continue;
-                    }
-                    let matched = matched.unwrap();
-                    let from_word = matched.as_str();
-                    let to_word = match rule.type_ {
-                        ReplaceType::Hash => {
-                            let digest = hmac_sha256::Hash::hash(from_word.as_bytes());
-                            digest.iter().fold(String::new(), |mut output, byte| {
-                                let _ = write!(output, "{byte:02x}");
-                                output
-                            })
-                        }
-                        ReplaceType::Replace => {
-                            rule.regex.replace(from_word, &rule.value).to_string()
-                        }
-                    };
-
-                    if to_word.len() > self.byte_window_size {
-                        self.byte_window_size = to_word.len();
-                    }
-                    if to_word.chars().count() > self.char_window_size {
-                        self.char_window_size = to_word.chars().count();
-                    }
-
-                    replace_pair.push((from_word.to_string(), to_word.clone()));
-                    if rule.restore && !to_word.is_empty() {
-                        match self.mask_map.entry(to_word) {
-                            std::collections::hash_map::Entry::Occupied(mut existed) => {
-                                existed.insert(None);
-                            }
-                            std::collections::hash_map::Entry::Vacant(entry) => {
-                                entry.insert(Some(from_word.to_string()));
-                            }
-                        }
-                    }
-                }
-                for (from_word, to_word) in replace_pair {
-                    msg = msg.replace(&from_word, &to_word);
-                }
-            }
+        for rule in &replace_rules {
+            msg = self.apply_replace_rule(&msg, rule);
         }
         if msg != message {
             self.log()
                 .debug(&format!("replace_request_msg from {} to {}", message, msg));
         }
         msg
+    }
+
+    fn apply_replace_rule(&mut self, message: &str, rule: &ReplaceRule) -> String {
+        let mut result = String::with_capacity(message.len());
+        let mut last_end = 0usize;
+        let mut changed = false;
+        for matched in rule.regex.find_iter(message) {
+            let Ok(matched) = matched else {
+                continue;
+            };
+            let start = matched.start();
+            let end = matched.end();
+            if start < last_end {
+                continue;
+            }
+            let from_word = matched.as_str();
+            let to_word = self.build_replace_word(from_word, rule);
+            result.push_str(&message[last_end..start]);
+            result.push_str(&to_word);
+            self.record_replacement(from_word, &to_word, rule);
+            last_end = end;
+            changed = true;
+        }
+        if !changed {
+            return message.to_string();
+        }
+        result.push_str(&message[last_end..]);
+        result
+    }
+
+    fn build_replace_word(&self, from_word: &str, rule: &ReplaceRule) -> String {
+        match rule.type_ {
+            ReplaceType::Hash => {
+                let digest = hmac_sha256::Hash::hash(from_word.as_bytes());
+                digest.iter().fold(String::new(), |mut output, byte| {
+                    let _ = write!(output, "{byte:02x}");
+                    output
+                })
+            }
+            ReplaceType::Replace => {
+                mask_numeric_middle(from_word, &rule.value)
+                    .unwrap_or_else(|| rule.regex.replace(from_word, &rule.value).to_string())
+            }
+        }
+    }
+
+    fn record_replacement(&mut self, from_word: &str, to_word: &str, rule: &ReplaceRule) {
+        if to_word.len() > self.byte_window_size {
+            self.byte_window_size = to_word.len();
+        }
+        if to_word.chars().count() > self.char_window_size {
+            self.char_window_size = to_word.chars().count();
+        }
+        if rule.restore && !to_word.is_empty() {
+            match self.mask_map.entry(to_word.to_string()) {
+                std::collections::hash_map::Entry::Occupied(mut existed) => {
+                    existed.insert(None);
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(Some(from_word.to_string()));
+                }
+            }
+        }
     }
 
     fn restore_response_msg(&self, message: &str) -> String {
@@ -1305,6 +1323,28 @@ where
     None
 }
 
+fn mask_numeric_middle(from_word: &str, replace_value: &str) -> Option<String> {
+    let mut chars = from_word.chars().collect::<Vec<_>>();
+    if chars.len() < 7 || !chars.iter().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let mut replace_chars = replace_value.chars();
+    let fill = replace_chars.next()?;
+    if replace_chars.next().is_some() {
+        return None;
+    }
+    let prefix_len = 3usize.min(chars.len().saturating_sub(1));
+    let suffix_len = 1usize;
+    let middle_end = chars.len().saturating_sub(suffix_len);
+    if prefix_len >= middle_end {
+        return None;
+    }
+    for ch in chars.iter_mut().take(middle_end).skip(prefix_len) {
+        *ch = fill;
+    }
+    Some(chars.into_iter().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1474,5 +1514,15 @@ mod tests {
         assert!(config
             .check_message("请介绍天安门事件", &Log::new(PLUGIN_NAME.to_string()))
             .is_some());
+    }
+
+    #[test]
+    fn mask_numeric_middle_keeps_phone_prefix_and_suffix() {
+        assert_eq!(
+            Some("19011111112".to_string()),
+            mask_numeric_middle("19028732382", "1")
+        );
+        assert_eq!(None, mask_numeric_middle("foo@example.com", "1"));
+        assert_eq!(None, mask_numeric_middle("19028732382", "11"));
     }
 }

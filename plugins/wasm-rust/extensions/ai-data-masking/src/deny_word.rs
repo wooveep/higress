@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use fancy_regex::Regex;
 use rust_embed::Embed;
 
@@ -83,6 +85,7 @@ pub(crate) struct DenyWord {
     contains_rules: Vec<MatchRule>,
     exact_rules: Vec<MatchRule>,
     regex_rules: Vec<MatchRule>,
+    contains_matcher: Option<TokenDfaMatcher>,
 }
 
 impl DenyWord {
@@ -103,6 +106,7 @@ impl DenyWord {
                 MatchType::Regex => deny_word.regex_rules.push(rule),
             }
         }
+        deny_word.contains_matcher = TokenDfaMatcher::build(&deny_word.contains_rules);
         deny_word
     }
 
@@ -131,14 +135,13 @@ impl DenyWord {
             if pattern.is_empty() {
                 continue;
             }
-            let regex = Regex::new(&format!("(?i:{})", regex_escape(pattern))).ok();
             rules.push(MatchRule::new(
                 None,
                 pattern.to_string(),
                 MatchType::Contains,
                 0,
                 true,
-                regex,
+                None,
             ));
         }
         Self::from_rules(rules)
@@ -154,10 +157,7 @@ impl DenyWord {
             let (match_type, regex) = if should_use_exact_system_match(pattern) {
                 (MatchType::Exact, None)
             } else {
-                (
-                    MatchType::Contains,
-                    Regex::new(&format!("(?i:{})", regex_escape(pattern))).ok(),
-                )
+                (MatchType::Contains, None)
             };
             rules.push(MatchRule::new(
                 None,
@@ -185,6 +185,7 @@ impl DenyWord {
             .sort_by(|left, right| right.priority.cmp(&left.priority));
         self.regex_rules
             .sort_by(|left, right| right.priority.cmp(&left.priority));
+        self.contains_matcher = TokenDfaMatcher::build(&self.contains_rules);
     }
 
     pub(crate) fn check(&self, message: &str) -> Option<MatchResult> {
@@ -192,24 +193,13 @@ impl DenyWord {
             return None;
         }
 
-        let normalized_message = message.to_lowercase();
-        for rule in &self.contains_rules {
-            if !normalized_message.contains(&rule.normalized_pattern) {
-                continue;
+        if let Some(matcher) = &self.contains_matcher {
+            if let Some(match_result) = matcher.find(message) {
+                return Some(match_result);
             }
-            if let Some(regex) = &rule.regex {
-                if let Ok(Some(matched)) = regex.find(message) {
-                    return Some(build_match_result(
-                        rule,
-                        message,
-                        matched.start(),
-                        matched.end(),
-                    ));
-                }
-            }
-            return Some(build_match_result(rule, message, 0, message.len()));
         }
 
+        let normalized_message = message.to_lowercase();
         for rule in &self.exact_rules {
             if normalized_message == rule.normalized_pattern {
                 return Some(build_match_result(rule, message, 0, message.len()));
@@ -230,6 +220,267 @@ impl DenyWord {
         }
 
         None
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TokenSpan {
+    normalized: String,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Default, Debug, Clone)]
+struct SegmentTrieNode {
+    next: HashMap<char, usize>,
+    terminal: bool,
+}
+
+#[derive(Default, Debug, Clone)]
+struct SegmentTrie {
+    nodes: Vec<SegmentTrieNode>,
+}
+
+impl SegmentTrie {
+    fn build(rules: &[MatchRule]) -> Self {
+        let mut trie = SegmentTrie {
+            nodes: vec![SegmentTrieNode::default()],
+        };
+        for rule in rules {
+            for token in rule
+                .pattern
+                .split_whitespace()
+                .map(str::trim)
+                .filter(|item| !item.is_empty() && item.chars().all(is_cjk_char))
+            {
+                trie.insert(token.to_lowercase());
+            }
+        }
+        trie
+    }
+
+    fn insert(&mut self, token: String) {
+        let mut node_idx = 0usize;
+        for ch in token.chars() {
+            let next_idx = if let Some(next_idx) = self.nodes[node_idx].next.get(&ch) {
+                *next_idx
+            } else {
+                let next_idx = self.nodes.len();
+                self.nodes.push(SegmentTrieNode::default());
+                self.nodes[node_idx].next.insert(ch, next_idx);
+                next_idx
+            };
+            node_idx = next_idx;
+        }
+        self.nodes[node_idx].terminal = true;
+    }
+
+    fn longest_match(&self, chars: &[char], start: usize) -> Option<usize> {
+        let mut node_idx = 0usize;
+        let mut best_end = None;
+        for (offset, ch) in chars.iter().enumerate().skip(start) {
+            let Some(next_idx) = self.nodes[node_idx].next.get(ch) else {
+                break;
+            };
+            node_idx = *next_idx;
+            if self.nodes[node_idx].terminal {
+                best_end = Some(offset + 1);
+            }
+        }
+        best_end
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TokenRule {
+    rule: MatchRule,
+    tokens: Vec<String>,
+}
+
+#[derive(Default, Debug, Clone)]
+struct TokenDfaNode {
+    next: HashMap<String, usize>,
+    outputs: Vec<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct TokenMatchCandidate {
+    rule_index: usize,
+    token_start: usize,
+    token_end: usize,
+}
+
+#[derive(Default, Debug, Clone)]
+struct TokenDfaMatcher {
+    nodes: Vec<TokenDfaNode>,
+    lexicon: SegmentTrie,
+    rules: Vec<TokenRule>,
+}
+
+impl TokenDfaMatcher {
+    fn build(rules: &[MatchRule]) -> Option<Self> {
+        if rules.is_empty() {
+            return None;
+        }
+        let lexicon = SegmentTrie::build(rules);
+        let mut matcher = TokenDfaMatcher {
+            nodes: vec![TokenDfaNode::default()],
+            lexicon,
+            rules: Vec::new(),
+        };
+        for rule in rules {
+            let tokens = tokenize_message(&rule.pattern, &matcher.lexicon)
+                .into_iter()
+                .map(|token| token.normalized)
+                .collect::<Vec<_>>();
+            if tokens.is_empty() {
+                continue;
+            }
+            let rule_index = matcher.rules.len();
+            matcher.rules.push(TokenRule {
+                rule: rule.clone(),
+                tokens: tokens.clone(),
+            });
+            let mut node_idx = 0usize;
+            for token in tokens {
+                let next_idx = if let Some(next_idx) = matcher.nodes[node_idx].next.get(&token) {
+                    *next_idx
+                } else {
+                    let next_idx = matcher.nodes.len();
+                    matcher.nodes.push(TokenDfaNode::default());
+                    matcher.nodes[node_idx].next.insert(token, next_idx);
+                    next_idx
+                };
+                node_idx = next_idx;
+            }
+            matcher.nodes[node_idx].outputs.push(rule_index);
+        }
+        Some(matcher)
+    }
+
+    fn find(&self, message: &str) -> Option<MatchResult> {
+        let tokens = tokenize_message(message, &self.lexicon);
+        if tokens.is_empty() {
+            return None;
+        }
+        let mut best: Option<TokenMatchCandidate> = None;
+        for start in 0..tokens.len() {
+            let mut node_idx = 0usize;
+            for end in start..tokens.len() {
+                let token = &tokens[end].normalized;
+                let Some(next_idx) = self.nodes[node_idx].next.get(token) else {
+                    break;
+                };
+                node_idx = *next_idx;
+                for rule_index in &self.nodes[node_idx].outputs {
+                    let candidate = TokenMatchCandidate {
+                        rule_index: *rule_index,
+                        token_start: start,
+                        token_end: end + 1,
+                    };
+                    if prefer_candidate(self, &candidate, best.as_ref()) {
+                        best = Some(candidate);
+                    }
+                }
+            }
+        }
+        let candidate = best?;
+        let rule = &self.rules[candidate.rule_index].rule;
+        let start = tokens[candidate.token_start].start;
+        let end = tokens[candidate.token_end - 1].end;
+        Some(build_match_result(rule, message, start, end))
+    }
+}
+
+fn prefer_candidate(
+    matcher: &TokenDfaMatcher,
+    candidate: &TokenMatchCandidate,
+    current: Option<&TokenMatchCandidate>,
+) -> bool {
+    let candidate_rule = &matcher.rules[candidate.rule_index];
+    let Some(current) = current else {
+        return true;
+    };
+    let current_rule = &matcher.rules[current.rule_index];
+    candidate_rule
+        .rule
+        .priority
+        .cmp(&current_rule.rule.priority)
+        .then_with(|| candidate_rule.tokens.len().cmp(&current_rule.tokens.len()))
+        .then_with(|| candidate_rule.rule.pattern.len().cmp(&current_rule.rule.pattern.len()))
+        .then_with(|| current.token_start.cmp(&candidate.token_start))
+        .is_gt()
+}
+
+fn tokenize_message(message: &str, lexicon: &SegmentTrie) -> Vec<TokenSpan> {
+    let mut tokens = Vec::new();
+    let mut iter = message.char_indices().peekable();
+    while let Some((start_idx, ch)) = iter.peek().copied() {
+        if ch.is_whitespace() || is_separator_char(ch) {
+            iter.next();
+            continue;
+        }
+        if is_ascii_token_char(ch) {
+            let mut end_idx = message.len();
+            let mut normalized = String::new();
+            while let Some((current_idx, current_ch)) = iter.peek().copied() {
+                if !is_ascii_token_char(current_ch) {
+                    end_idx = current_idx;
+                    break;
+                }
+                normalized.extend(current_ch.to_lowercase());
+                iter.next();
+            }
+            if normalized.is_empty() {
+                continue;
+            }
+            tokens.push(TokenSpan {
+                normalized,
+                start: start_idx,
+                end: end_idx,
+            });
+            continue;
+        }
+        if is_cjk_char(ch) {
+            let mut run = Vec::new();
+            while let Some((current_idx, current_ch)) = iter.peek().copied() {
+                if !is_cjk_char(current_ch) {
+                    break;
+                }
+                run.push((current_idx, current_ch));
+                iter.next();
+            }
+            tokenize_cjk_run(message, &run, lexicon, &mut tokens);
+            continue;
+        }
+        iter.next();
+    }
+    tokens
+}
+
+fn tokenize_cjk_run(
+    message: &str,
+    run: &[(usize, char)],
+    lexicon: &SegmentTrie,
+    tokens: &mut Vec<TokenSpan>,
+) {
+    let chars = run.iter().map(|(_, ch)| ch.to_ascii_lowercase()).collect::<Vec<_>>();
+    let mut index = 0usize;
+    while index < run.len() {
+        let end_index = lexicon.longest_match(&chars, index).unwrap_or(index + 1);
+        let start_byte = run[index].0;
+        let end_byte = if end_index < run.len() {
+            run[end_index].0
+        } else {
+            message.len()
+        };
+        let normalized = message[start_byte..end_byte].to_lowercase();
+        tokens.push(TokenSpan {
+            normalized,
+            start: start_byte,
+            end: end_byte,
+        });
+        index = end_index;
     }
 }
 
@@ -282,18 +533,54 @@ fn build_excerpt(message: &str, start: usize, end: usize) -> String {
     excerpt
 }
 
-fn regex_escape(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$' => {
-                escaped.push('\\');
-                escaped.push(ch);
-            }
-            _ => escaped.push(ch),
-        }
-    }
-    escaped
+fn is_ascii_token_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '@')
+}
+
+fn is_separator_char(ch: char) -> bool {
+    matches!(
+        ch,
+        ',' | '.'
+            | '，'
+            | '。'
+            | '、'
+            | ';'
+            | '；'
+            | ':'
+            | '：'
+            | '!'
+            | '！'
+            | '?'
+            | '？'
+            | '('
+            | ')'
+            | '（'
+            | '）'
+            | '['
+            | ']'
+            | '{'
+            | '}'
+            | '<'
+            | '>'
+            | '"'
+            | '\''
+            | '`'
+            | '/'
+            | '\\'
+            | '|'
+            | '+'
+            | '='
+            | '*'
+            | '#'
+            | '&'
+            | '^'
+            | '%'
+            | '$'
+            | '~'
+            | '\n'
+            | '\r'
+            | '\t'
+    )
 }
 
 fn should_use_exact_system_match(pattern: &str) -> bool {
@@ -328,5 +615,14 @@ mod tests {
         assert!(deny_word.check("天安门").is_some());
         assert!(deny_word.check("天安门的景点").is_none());
         assert!(deny_word.check("请介绍天安门事件").is_some());
+    }
+
+    #[test]
+    fn contains_rules_match_on_segmented_tokens() {
+        let deny_word = DenyWord::from_text("南京\nsex");
+
+        assert!(deny_word.check("南京怎么样").is_some());
+        assert!(deny_word.check("my sex life").is_some());
+        assert!(deny_word.check("sexy style").is_none());
     }
 }
