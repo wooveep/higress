@@ -455,6 +455,19 @@ func TestBuildAmountChargeArgs(t *testing.T) {
 		120,
 		130,
 		250,
+		30,
+		20,
+		10,
+		5,
+		12,
+		18,
+		2,
+		1,
+		1,
+		"1h",
+		`{"cached_tokens":5}`,
+		`{"image_tokens":18}`,
+		`{"cache_ttl":"1h"}`,
 		9,
 		"KEY123",
 		startedAt,
@@ -465,15 +478,33 @@ func TestBuildAmountChargeArgs(t *testing.T) {
 		10800,
 	)
 
-	require.Len(t, args, 28)
+	require.Len(t, args, 38)
 	require.Equal(t, int64(308), args[0])
 	require.Equal(t, "trace-1", args[3])
 	require.Equal(t, "success", args[9])
-	require.Equal(t, "KEY123", args[21])
-	require.Equal(t, startedAt.Format(time.RFC3339Nano), args[22])
-	require.Equal(t, finishedAt.Format(time.RFC3339Nano), args[23])
-	require.Equal(t, occurredAt.Format(time.RFC3339Nano), args[24])
-	require.Equal(t, int64(3600), args[25])
-	require.Equal(t, int64(7200), args[26])
-	require.Equal(t, int64(10800), args[27])
+	require.Equal(t, int64(30), args[17])
+	require.Equal(t, "1h", args[26])
+	require.Equal(t, `{"cache_ttl":"1h"}`, args[29])
+	require.Equal(t, "KEY123", args[31])
+	require.Equal(t, startedAt.Format(time.RFC3339Nano), args[32])
+	require.Equal(t, finishedAt.Format(time.RFC3339Nano), args[33])
+	require.Equal(t, occurredAt.Format(time.RFC3339Nano), args[34])
+	require.Equal(t, int64(3600), args[35])
+	require.Equal(t, int64(7200), args[36])
+	require.Equal(t, int64(10800), args[37])
+}
+
+func TestPreferredBillingModelName(t *testing.T) {
+	require.Equal(t, "qwen-plus", preferredBillingModelName("qwen-plus", "qwen-plus-2026-04-01"))
+	require.Equal(t, "gemini-2.5-pro", preferredBillingModelName("", "gemini-2.5-pro"))
+	require.Equal(t, "", preferredBillingModelName("", "unknown"))
+}
+
+func TestAmountWindowTTLSecondsUsesUTC(t *testing.T) {
+	now := time.Date(2026, time.April, 1, 23, 30, 0, 0, time.UTC)
+	dailyTTL, weeklyTTL, monthlyTTL := amountWindowTTLSeconds(now)
+
+	require.Equal(t, int64(30*60), dailyTTL)
+	require.Equal(t, int64(4*24*60*60+30*60), weeklyTTL)
+	require.Equal(t, int64(29*24*60*60+30*60), monthlyTTL)
 }

@@ -275,6 +275,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config QuotaConfig, body []byte)
 		if !ok || consumer == "" {
 			return types.ActionContinue
 		}
+		captureDetailedRequestHints(ctx, body)
 		return checkAmountQuota(ctx, config, consumer, body)
 	}
 	adminMode, ok := ctx.GetContext("adminMode").(AdminMode)
@@ -308,6 +309,13 @@ func onHttpStreamingResponseBody(ctx wrapper.HttpContext, config QuotaConfig, da
 		ctx.SetContext(tokenusage.CtxKeyInputToken, usage.InputToken)
 		ctx.SetContext(tokenusage.CtxKeyOutputToken, usage.OutputToken)
 	}
+	detailedMetrics := mergeDetailedUsageFromResponse(ctx, data)
+	if detailedMetrics.InputTokens > 0 {
+		ctx.SetContext(tokenusage.CtxKeyInputToken, detailedMetrics.InputTokens)
+	}
+	if detailedMetrics.OutputTokens > 0 {
+		ctx.SetContext(tokenusage.CtxKeyOutputToken, detailedMetrics.OutputTokens)
+	}
 
 	// chat completion mode
 	if !endOfStream {
@@ -333,19 +341,29 @@ func onHttpStreamingResponseBody(ctx wrapper.HttpContext, config QuotaConfig, da
 	if value := ctx.GetContext(tokenusage.CtxKeyOutputToken); value != nil {
 		outputToken = value.(int64)
 	}
+	metrics := getDetailedUsageFromContext(ctx)
+	if metrics.InputTokens > 0 {
+		inputToken = metrics.InputTokens
+	}
+	if metrics.OutputTokens > 0 {
+		outputToken = metrics.OutputTokens
+	}
 	totalToken := inputToken + outputToken
+	if metrics.TotalTokens() > 0 {
+		totalToken = metrics.TotalTokens()
+	}
 	if config.QuotaUnit == QuotaUnitAmount {
 		if statusCode < 200 || statusCode >= 300 {
 			emitAmountAuditEvent(ctx, config, consumer, modelName, "failed", "missing", statusCode,
 				"upstream_failed", fmt.Sprintf("Upstream request finished with status %d.", statusCode))
 			return data
 		}
-		if inputToken <= 0 && outputToken <= 0 {
+		if totalToken <= 0 && metrics.InputImageCount <= 0 && metrics.OutputImageCount <= 0 {
 			emitAmountAuditEvent(ctx, config, consumer, modelName, "success", "missing", statusCode,
 				"missing_usage", "Successful response did not expose billable usage.")
 			return data
 		}
-		emitAmountUsageEvent(ctx, config, consumer, modelName, inputToken, outputToken, totalToken, statusCode)
+		emitAmountUsageEvent(ctx, config, consumer, modelName, metrics, statusCode)
 		return data
 	}
 	log.Debugf("update consumer:%s, totalToken:%d", consumer, totalToken)
@@ -543,10 +561,22 @@ func deltaQuota(ctx wrapper.HttpContext, config QuotaConfig, adminConsumer strin
 }
 
 type modelPrice struct {
-	ModelID      string
-	PriceVersion int64
-	InputPer1K   int64
-	OutputPer1K  int64
+	ModelID                                             string
+	PriceVersion                                        int64
+	InputPer1K                                          int64
+	OutputPer1K                                         int64
+	InputRequestPriceMicroYuan                          int64
+	CacheCreationInputTokenPricePer1KMicroYuan          int64
+	CacheCreationInputTokenPriceAbove1hrPer1KMicroYuan  int64
+	CacheReadInputTokenPricePer1KMicroYuan              int64
+	InputTokenPriceAbove200kPer1KMicroYuan              int64
+	OutputTokenPriceAbove200kPer1KMicroYuan             int64
+	CacheCreationInputTokenPriceAbove200kPer1KMicroYuan int64
+	CacheReadInputTokenPriceAbove200kPer1KMicroYuan     int64
+	OutputImagePriceMicroYuan                           int64
+	OutputImageTokenPricePer1KMicroYuan                 int64
+	InputImagePriceMicroYuan                            int64
+	InputImageTokenPricePer1KMicroYuan                  int64
 }
 
 func quotaStorageKey(config QuotaConfig, consumer string) string {
@@ -591,9 +621,13 @@ func checkAmountQuota(ctx wrapper.HttpContext, config QuotaConfig, consumer stri
 	return types.ActionPause
 }
 
-func emitAmountUsageEvent(ctx wrapper.HttpContext, config QuotaConfig, consumer string, modelName string, inputToken, outputToken, totalToken int64, httpStatus int) {
-	if storedPrice, ok := ctx.GetContext(ctxKeyRequestModelPrice).(modelPrice); ok && normalizeModelName(storedPrice.ModelID) == modelName {
-		dispatchAmountCharge(ctx, config, consumer, modelName, storedPrice, inputToken, outputToken, totalToken, httpStatus)
+func emitAmountUsageEvent(ctx wrapper.HttpContext, config QuotaConfig, consumer string, modelName string, metrics detailedUsageMetrics, httpStatus int) {
+	if storedPrice, ok := ctx.GetContext(ctxKeyRequestModelPrice).(modelPrice); ok {
+		billingModelName := normalizeModelName(storedPrice.ModelID)
+		if billingModelName == "" {
+			billingModelName = preferredBillingModelName(ctx.GetStringContext(ctxKeyRequestModelName, ""), modelName)
+		}
+		dispatchAmountCharge(ctx, config, consumer, billingModelName, storedPrice, metrics, httpStatus)
 		return
 	}
 
@@ -605,39 +639,65 @@ func emitAmountUsageEvent(ctx wrapper.HttpContext, config QuotaConfig, consumer 
 				"model_price_missing", "Successful response could not find model pricing.")
 			return
 		}
-		dispatchAmountCharge(ctx, config, consumer, modelName, price, inputToken, outputToken, totalToken, httpStatus)
+		dispatchAmountCharge(ctx, config, consumer, modelName, price, metrics, httpStatus)
 	})
 }
 
-func dispatchAmountCharge(ctx wrapper.HttpContext, config QuotaConfig, consumer string, modelName string, price modelPrice, inputToken, outputToken, totalToken int64, httpStatus int) {
-	cost := calculateAmountCost(inputToken, outputToken, price)
+func dispatchAmountCharge(ctx wrapper.HttpContext, config QuotaConfig, consumer string, modelName string, price modelPrice, metrics detailedUsageMetrics, httpStatus int) {
+	cost := calculateAmountCost(metrics, price)
 	dispatchAmountEvent(ctx, config, amountEvent{
-		Consumer:      consumer,
-		ModelName:     modelName,
-		RequestStatus: "success",
-		UsageStatus:   "parsed",
-		HTTPStatus:    httpStatus,
-		InputToken:    inputToken,
-		OutputToken:   outputToken,
-		TotalToken:    totalToken,
-		Cost:          cost,
-		PriceVersion:  price.PriceVersion,
+		Consumer:                   consumer,
+		ModelName:                  modelName,
+		RequestStatus:              "success",
+		UsageStatus:                "parsed",
+		HTTPStatus:                 httpStatus,
+		InputToken:                 metrics.InputTokens,
+		OutputToken:                metrics.OutputTokens,
+		TotalToken:                 metrics.TotalTokens(),
+		CacheCreationInputTokens:   metrics.CacheCreationInputTokens,
+		CacheCreation5mInputTokens: metrics.CacheCreation5mInputTokens,
+		CacheCreation1hInputTokens: metrics.CacheCreation1hInputTokens,
+		CacheReadInputTokens:       metrics.CacheReadInputTokens,
+		InputImageTokens:           metrics.InputImageTokens,
+		OutputImageTokens:          metrics.OutputImageTokens,
+		InputImageCount:            metrics.InputImageCount,
+		OutputImageCount:           metrics.OutputImageCount,
+		RequestCount:               maxInt64Value(metrics.RequestCount, 1),
+		CacheTTL:                   metrics.CacheTTL,
+		InputTokenDetailsJSON:      buildInputTokenDetailsJSON(metrics),
+		OutputTokenDetailsJSON:     buildOutputTokenDetailsJSON(metrics),
+		ProviderUsageJSON:          buildProviderUsageJSON(metrics),
+		Cost:                       cost,
+		PriceVersion:               price.PriceVersion,
 	})
 }
 
 type amountEvent struct {
-	Consumer      string
-	ModelName     string
-	RequestStatus string
-	UsageStatus   string
-	HTTPStatus    int
-	ErrorCode     string
-	ErrorMessage  string
-	InputToken    int64
-	OutputToken   int64
-	TotalToken    int64
-	Cost          int64
-	PriceVersion  int64
+	Consumer                   string
+	ModelName                  string
+	RequestStatus              string
+	UsageStatus                string
+	HTTPStatus                 int
+	ErrorCode                  string
+	ErrorMessage               string
+	InputToken                 int64
+	OutputToken                int64
+	TotalToken                 int64
+	CacheCreationInputTokens   int64
+	CacheCreation5mInputTokens int64
+	CacheCreation1hInputTokens int64
+	CacheReadInputTokens       int64
+	InputImageTokens           int64
+	OutputImageTokens          int64
+	InputImageCount            int64
+	OutputImageCount           int64
+	RequestCount               int64
+	CacheTTL                   string
+	InputTokenDetailsJSON      string
+	OutputTokenDetailsJSON     string
+	ProviderUsageJSON          string
+	Cost                       int64
+	PriceVersion               int64
 }
 
 func emitAmountAuditEvent(ctx wrapper.HttpContext, config QuotaConfig, consumer string, modelName string, requestStatus string, usageStatus string, httpStatus int, errorCode string, errorMessage string) {
@@ -692,6 +752,19 @@ func dispatchAmountEvent(ctx wrapper.HttpContext, config QuotaConfig, event amou
 		event.InputToken,
 		event.OutputToken,
 		event.TotalToken,
+		event.CacheCreationInputTokens,
+		event.CacheCreation5mInputTokens,
+		event.CacheCreation1hInputTokens,
+		event.CacheReadInputTokens,
+		event.InputImageTokens,
+		event.OutputImageTokens,
+		event.InputImageCount,
+		event.OutputImageCount,
+		event.RequestCount,
+		event.CacheTTL,
+		event.InputTokenDetailsJSON,
+		event.OutputTokenDetailsJSON,
+		event.ProviderUsageJSON,
 		event.PriceVersion,
 		strings.TrimSpace(ctx.GetStringContext(ctxKeyRequestAPIKeyID, "")),
 		parseRFC3339Time(ctx.GetStringContext(ctxKeyRequestStartedAt, "")),
@@ -704,7 +777,7 @@ func dispatchAmountEvent(ctx wrapper.HttpContext, config QuotaConfig, event amou
 	_ = config.redisClient.Eval(amountChargeScript, len(keys), keys, args, nil)
 }
 
-func buildAmountChargeArgs(cost int64, eventID, requestID, traceID, consumer, routeName, requestPath, requestKind, modelName, requestStatus, usageStatus string, httpStatus int, errorCode, errorMessage string, inputToken, outputToken, totalToken, priceVersion int64, apiKeyID string, startedAt time.Time, finishedAt time.Time, occurredAt time.Time, dailyTTL int64, weeklyTTL int64, monthlyTTL int64) []interface{} {
+func buildAmountChargeArgs(cost int64, eventID, requestID, traceID, consumer, routeName, requestPath, requestKind, modelName, requestStatus, usageStatus string, httpStatus int, errorCode, errorMessage string, inputToken, outputToken, totalToken, cacheCreationInputToken, cacheCreation5mInputToken, cacheCreation1hInputToken, cacheReadInputToken, inputImageToken, outputImageToken, inputImageCount, outputImageCount, requestCount int64, cacheTTL, inputTokenDetailsJSON, outputTokenDetailsJSON, providerUsageJSON string, priceVersion int64, apiKeyID string, startedAt time.Time, finishedAt time.Time, occurredAt time.Time, dailyTTL int64, weeklyTTL int64, monthlyTTL int64) []interface{} {
 	return []interface{}{
 		cost,
 		eventID,
@@ -723,9 +796,19 @@ func buildAmountChargeArgs(cost int64, eventID, requestID, traceID, consumer, ro
 		inputToken,
 		outputToken,
 		totalToken,
-		"",
-		"",
-		"",
+		cacheCreationInputToken,
+		cacheCreation5mInputToken,
+		cacheCreation1hInputToken,
+		cacheReadInputToken,
+		inputImageToken,
+		outputImageToken,
+		inputImageCount,
+		outputImageCount,
+		requestCount,
+		cacheTTL,
+		inputTokenDetailsJSON,
+		outputTokenDetailsJSON,
+		providerUsageJSON,
 		priceVersion,
 		apiKeyID,
 		startedAt.Format(time.RFC3339Nano),
@@ -737,10 +820,30 @@ func buildAmountChargeArgs(cost int64, eventID, requestID, traceID, consumer, ro
 	}
 }
 
-func calculateAmountCost(inputToken, outputToken int64, price modelPrice) int64 {
-	inputCost := roundTokenCost(inputToken, price.InputPer1K)
-	outputCost := roundTokenCost(outputToken, price.OutputPer1K)
-	return inputCost + outputCost
+func calculateAmountCost(metrics detailedUsageMetrics, price modelPrice) int64 {
+	inputContextTokens := metrics.InputTokens + maxInt64Value(metrics.CacheCreationInputTokens,
+		metrics.CacheCreation5mInputTokens+metrics.CacheCreation1hInputTokens) + metrics.CacheReadInputTokens + metrics.InputImageTokens
+	useAbove200k := inputContextTokens > 200_000
+	inputPer1K := choosePrice(useAbove200k, price.InputTokenPriceAbove200kPer1KMicroYuan, price.InputPer1K)
+	outputPer1K := choosePrice(useAbove200k, price.OutputTokenPriceAbove200kPer1KMicroYuan, price.OutputPer1K)
+	cacheCreationPer1K := choosePrice(useAbove200k, price.CacheCreationInputTokenPriceAbove200kPer1KMicroYuan,
+		price.CacheCreationInputTokenPricePer1KMicroYuan)
+	cacheReadPer1K := choosePrice(useAbove200k, price.CacheReadInputTokenPriceAbove200kPer1KMicroYuan,
+		price.CacheReadInputTokenPricePer1KMicroYuan)
+	cacheCreation1hPer1K := choosePrice(false, 0, price.CacheCreationInputTokenPriceAbove1hrPer1KMicroYuan)
+	if cacheCreation1hPer1K == 0 {
+		cacheCreation1hPer1K = cacheCreationPer1K
+	}
+	return roundTokenCost(metrics.InputTokens, inputPer1K) +
+		roundTokenCost(metrics.OutputTokens, outputPer1K) +
+		roundTokenCost(metrics.CacheCreation5mInputTokens, cacheCreationPer1K) +
+		roundTokenCost(metrics.CacheCreation1hInputTokens, cacheCreation1hPer1K) +
+		roundTokenCost(metrics.CacheReadInputTokens, cacheReadPer1K) +
+		roundTokenCost(metrics.InputImageTokens, price.InputImageTokenPricePer1KMicroYuan) +
+		roundTokenCost(metrics.OutputImageTokens, price.OutputImageTokenPricePer1KMicroYuan) +
+		price.InputRequestPriceMicroYuan*maxInt64Value(metrics.RequestCount, 1) +
+		price.InputImagePriceMicroYuan*metrics.InputImageCount +
+		price.OutputImagePriceMicroYuan*metrics.OutputImageCount
 }
 
 func roundTokenCost(tokens int64, microPer1K int64) int64 {
@@ -777,10 +880,22 @@ func parseModelPriceResponse(modelName string, response resp.Value) (modelPrice,
 		modelID = modelName
 	}
 	return modelPrice{
-		ModelID:      modelID,
-		PriceVersion: priceVersion,
-		InputPer1K:   inputPer1K,
-		OutputPer1K:  outputPer1K,
+		ModelID:                    modelID,
+		PriceVersion:               priceVersion,
+		InputPer1K:                 inputPer1K,
+		OutputPer1K:                outputPer1K,
+		InputRequestPriceMicroYuan: parseInt64String(kv["input_request_price_micro_yuan"]),
+		CacheCreationInputTokenPricePer1KMicroYuan:          parseInt64String(kv["cache_creation_input_token_price_per_1k_micro_yuan"]),
+		CacheCreationInputTokenPriceAbove1hrPer1KMicroYuan:  parseInt64String(kv["cache_creation_input_token_price_above_1hr_per_1k_micro_yuan"]),
+		CacheReadInputTokenPricePer1KMicroYuan:              parseInt64String(kv["cache_read_input_token_price_per_1k_micro_yuan"]),
+		InputTokenPriceAbove200kPer1KMicroYuan:              parseInt64String(kv["input_token_price_above_200k_per_1k_micro_yuan"]),
+		OutputTokenPriceAbove200kPer1KMicroYuan:             parseInt64String(kv["output_token_price_above_200k_per_1k_micro_yuan"]),
+		CacheCreationInputTokenPriceAbove200kPer1KMicroYuan: parseInt64String(kv["cache_creation_input_token_price_above_200k_per_1k_micro_yuan"]),
+		CacheReadInputTokenPriceAbove200kPer1KMicroYuan:     parseInt64String(kv["cache_read_input_token_price_above_200k_per_1k_micro_yuan"]),
+		OutputImagePriceMicroYuan:                           parseInt64String(kv["output_image_price_micro_yuan"]),
+		OutputImageTokenPricePer1KMicroYuan:                 parseInt64String(kv["output_image_token_price_per_1k_micro_yuan"]),
+		InputImagePriceMicroYuan:                            parseInt64String(kv["input_image_price_micro_yuan"]),
+		InputImageTokenPricePer1KMicroYuan:                  parseInt64String(kv["input_image_token_price_per_1k_micro_yuan"]),
 	}, true
 }
 
@@ -794,6 +909,75 @@ func parseRespInteger(value resp.Value) int64 {
 		return 0
 	}
 	return parsed
+}
+
+func parseInt64String(value string) int64 {
+	parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return parsed
+}
+
+func choosePrice(usePrimary bool, primary int64, fallback int64) int64 {
+	if usePrimary && primary > 0 {
+		return primary
+	}
+	return fallback
+}
+
+func buildInputTokenDetailsJSON(metrics detailedUsageMetrics) string {
+	payload := map[string]int64{}
+	if metrics.CacheReadInputTokens > 0 {
+		payload["cached_tokens"] = metrics.CacheReadInputTokens
+	}
+	if metrics.CacheCreationInputTokens > 0 {
+		payload["cache_creation_input_tokens"] = metrics.CacheCreationInputTokens
+	}
+	if metrics.CacheCreation5mInputTokens > 0 {
+		payload["cache_creation_5m_input_tokens"] = metrics.CacheCreation5mInputTokens
+	}
+	if metrics.CacheCreation1hInputTokens > 0 {
+		payload["cache_creation_1h_input_tokens"] = metrics.CacheCreation1hInputTokens
+	}
+	if metrics.InputImageTokens > 0 {
+		payload["image_tokens"] = metrics.InputImageTokens
+	}
+	if len(payload) == 0 {
+		return ""
+	}
+	body, _ := json.Marshal(payload)
+	return string(body)
+}
+
+func buildOutputTokenDetailsJSON(metrics detailedUsageMetrics) string {
+	payload := map[string]int64{}
+	if metrics.OutputImageTokens > 0 {
+		payload["image_tokens"] = metrics.OutputImageTokens
+	}
+	if len(payload) == 0 {
+		return ""
+	}
+	body, _ := json.Marshal(payload)
+	return string(body)
+}
+
+func buildProviderUsageJSON(metrics detailedUsageMetrics) string {
+	body, _ := json.Marshal(map[string]any{
+		"input_tokens":                   metrics.InputTokens,
+		"output_tokens":                  metrics.OutputTokens,
+		"cache_creation_input_tokens":    metrics.CacheCreationInputTokens,
+		"cache_creation_5m_input_tokens": metrics.CacheCreation5mInputTokens,
+		"cache_creation_1h_input_tokens": metrics.CacheCreation1hInputTokens,
+		"cache_read_input_tokens":        metrics.CacheReadInputTokens,
+		"input_image_tokens":             metrics.InputImageTokens,
+		"output_image_tokens":            metrics.OutputImageTokens,
+		"input_image_count":              metrics.InputImageCount,
+		"output_image_count":             metrics.OutputImageCount,
+		"request_count":                  metrics.RequestCount,
+		"cache_ttl":                      metrics.CacheTTL,
+	})
+	return string(body)
 }
 
 func extractRequestModel(body []byte) string {
@@ -810,14 +994,15 @@ func normalizeModelName(modelName string) string {
 }
 
 func resolveEventModelName(ctx wrapper.HttpContext) string {
-	modelName := ""
+	responseModel := ""
 	if model, ok := ctx.GetUserAttribute(tokenusage.CtxKeyModel).(string); ok {
-		modelName = normalizeModelName(model)
+		responseModel = model
 	}
-	if modelName == "" {
-		modelName = normalizeModelName(ctx.GetStringContext(ctxKeyRequestModelName, ""))
-	}
-	return modelName
+	return preferredBillingModelName(ctx.GetStringContext(ctxKeyRequestModelName, ""), responseModel)
+}
+
+func preferredBillingModelName(requestModel string, responseModel string) string {
+	return firstNonEmptyString(normalizeModelName(requestModel), normalizeModelName(responseModel))
 }
 
 func getResponseStatusCode() int {
@@ -964,7 +1149,7 @@ func amountAdmissionMessage(reason string) string {
 }
 
 func amountWindowTTLSeconds(now time.Time) (int64, int64, int64) {
-	location := time.FixedZone("Asia/Shanghai", 8*60*60)
+	location := time.UTC
 	localNow := now.In(location)
 	nextDay := time.Date(localNow.Year(), localNow.Month(), localNow.Day()+1, 0, 0, 0, 0, location)
 	weekStart := localNow.AddDate(0, 0, -((int(localNow.Weekday()) + 6) % 7))
@@ -994,7 +1179,7 @@ end
 redis.call('EXPIRE', dedupKey, 86400)
 local requestStatus = ARGV[10]
 local usageStatus = ARGV[11]
-local apiKeyId = ARGV[22]
+local apiKeyId = ARGV[32]
 local nextBalance = redis.call('GET', balanceKey) or '0'
 if cost and cost > 0 and requestStatus == 'success' and usageStatus == 'parsed' then
   nextBalance = redis.call('DECRBY', balanceKey, cost)
@@ -1002,9 +1187,9 @@ if cost and cost > 0 and requestStatus == 'success' and usageStatus == 'parsed' 
   redis.call('INCRBY', userDailyKey, cost)
   redis.call('INCRBY', userWeeklyKey, cost)
   redis.call('INCRBY', userMonthlyKey, cost)
-  local dailyTTL = tonumber(ARGV[26]) or 0
-  local weeklyTTL = tonumber(ARGV[27]) or 0
-  local monthlyTTL = tonumber(ARGV[28]) or 0
+  local dailyTTL = tonumber(ARGV[36]) or 0
+  local weeklyTTL = tonumber(ARGV[37]) or 0
+  local monthlyTTL = tonumber(ARGV[38]) or 0
   if dailyTTL > 0 then redis.call('EXPIRE', userDailyKey, dailyTTL) end
   if weeklyTTL > 0 then redis.call('EXPIRE', userWeeklyKey, weeklyTTL) end
   if monthlyTTL > 0 then redis.call('EXPIRE', userMonthlyKey, monthlyTTL) end
@@ -1035,15 +1220,25 @@ redis.call('XADD', streamKey, '*',
   'input_tokens', ARGV[15],
   'output_tokens', ARGV[16],
   'total_tokens', ARGV[17],
-  'input_token_details_json', ARGV[18],
-  'output_token_details_json', ARGV[19],
-  'provider_usage_json', ARGV[20],
+  'cache_creation_input_tokens', ARGV[18],
+  'cache_creation_5m_input_tokens', ARGV[19],
+  'cache_creation_1h_input_tokens', ARGV[20],
+  'cache_read_input_tokens', ARGV[21],
+  'input_image_tokens', ARGV[22],
+  'output_image_tokens', ARGV[23],
+  'input_image_count', ARGV[24],
+  'output_image_count', ARGV[25],
+  'request_count', ARGV[26],
+  'cache_ttl', ARGV[27],
+  'input_token_details_json', ARGV[28],
+  'output_token_details_json', ARGV[29],
+  'provider_usage_json', ARGV[30],
   'cost_micro_yuan', ARGV[1],
-  'price_version_id', ARGV[21],
-  'api_key_id', ARGV[22],
-  'started_at', ARGV[23],
-  'finished_at', ARGV[24],
-  'occurred_at', ARGV[25]
+  'price_version_id', ARGV[31],
+  'api_key_id', ARGV[32],
+  'started_at', ARGV[33],
+  'finished_at', ARGV[34],
+  'occurred_at', ARGV[35]
 )
 return {1, nextBalance}
 `

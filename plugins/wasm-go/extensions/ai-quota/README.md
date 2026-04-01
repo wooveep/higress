@@ -13,6 +13,12 @@ description: AI 配额管理插件配置参考
 
 插件需要配合 `key-auth`、`jwt-auth` 等认证插件获取 consumer 名称；在金额模式下不再依赖 `ai-statistics` 作为主账务来源，真实消费会直接按请求写入事件流。
 
+`amount` 模式下的日/周/月自然窗口统一按 `UTC` 计算：
+
+- 日窗口在上海时区的次日 `00:00` 重置
+- 周窗口以周一 `00:00` 为起点
+- 月窗口以下月 1 日 `00:00` 为起点
+
 ## 运行属性
 
 插件执行阶段：`默认阶段`
@@ -66,6 +72,35 @@ redis:
 - 若模型没有有效价格或余额小于等于 0，会直接拒绝，并写入审计事件。
 - 请求成功结束后会按真实 token 用量计算 `micro_yuan` 扣减金额，并写入 Redis Stream。
 - 后端 billing consumer 再从 Stream 中落库到 MySQL 账本。
+- 日/周/月金额窗口的 TTL 统一按 `UTC` 自然日历推导，而不是按部署机器本地时区。
+
+### 金额模式计费口径
+
+`amount` 模式会优先读取 `price_key_prefix + <provider>/<model>` 对应的 Redis Hash。该价格快照由 Portal 预先物化，已经包含 `ModelPriceData` 的回退结果，因此运行态不会再做浮点回退。
+
+当前会写入账务事件并参与扣费/聚合的 usage 维度包括：
+
+- `input_tokens`
+- `output_tokens`
+- `cache_creation_input_tokens`
+- `cache_creation_5m_input_tokens`
+- `cache_creation_1h_input_tokens`
+- `cache_read_input_tokens`
+- `input_image_tokens`
+- `output_image_tokens`
+- `input_image_count`
+- `output_image_count`
+- `request_count`
+
+金额计算会同时覆盖：
+
+- 文本输入/输出 token 单价
+- 缓存创建、缓存读取、`above_200k` 分级 token 单价
+- 输入/输出图像 token 单价
+- `input_cost_per_request`
+- `input_cost_per_image` / `output_cost_per_image`
+
+当上游只返回聚合 `cache_creation_input_tokens` 时，插件会优先使用请求侧 `cache_control.ttl` 或等价 `ttl` 把剩余 token 分配到 `5m/1h` 桶；若未提供 TTL，则默认归入 `5m`。
 
 ### 兼容 token 模式
 ```yaml

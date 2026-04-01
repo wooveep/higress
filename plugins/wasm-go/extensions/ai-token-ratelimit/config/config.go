@@ -41,6 +41,9 @@ const (
 
 	DefaultRejectedCode uint32 = 429
 	DefaultRejectedMsg  string = "Too many requests"
+	DefaultPriceKeyPrefix      = "billing:model-price:"
+	LimitUnitToken            = "token"
+	LimitUnitAmount           = "amount"
 
 	Second           int64 = 1
 	SecondsPerMinute       = 60 * Second
@@ -48,15 +51,24 @@ const (
 	SecondsPerDay          = 24 * SecondsPerHour
 )
 
-var timeWindows = map[string]int64{
+var tokenTimeWindows = map[string]int64{
 	"token_per_second": Second,
 	"token_per_minute": SecondsPerMinute,
 	"token_per_hour":   SecondsPerHour,
 	"token_per_day":    SecondsPerDay,
 }
 
+var amountTimeWindows = map[string]int64{
+	"amount_per_second": Second,
+	"amount_per_minute": SecondsPerMinute,
+	"amount_per_hour":   SecondsPerHour,
+	"amount_per_day":    SecondsPerDay,
+}
+
 type AiTokenRateLimitConfig struct {
 	RuleName        string           // 限流规则名称
+	LimitUnit       string           // 限流单位: token / amount
+	PriceKeyPrefix  string           // amount 模式下模型价格前缀
 	GlobalThreshold *GlobalThreshold // 全局限流配置
 	RuleItems       []LimitRuleItem  // 限流规则项
 	RejectedCode    uint32           // 当请求超过阈值被拒绝时,返回的HTTP状态码
@@ -151,6 +163,17 @@ func ParseAiTokenRateLimitConfig(json gjson.Result, config *AiTokenRateLimitConf
 		return errors.New("missing rule_name in config")
 	}
 	config.RuleName = ruleName.String()
+	config.LimitUnit = strings.ToLower(strings.TrimSpace(json.Get("limit_unit").String()))
+	if config.LimitUnit == "" {
+		config.LimitUnit = LimitUnitToken
+	}
+	if config.LimitUnit != LimitUnitToken && config.LimitUnit != LimitUnitAmount {
+		return fmt.Errorf("unsupported limit_unit: %s", config.LimitUnit)
+	}
+	config.PriceKeyPrefix = strings.TrimSpace(json.Get("price_key_prefix").String())
+	if config.PriceKeyPrefix == "" && config.LimitUnit == LimitUnitAmount {
+		config.PriceKeyPrefix = DefaultPriceKeyPrefix
+	}
 
 	// 初始化限流规则
 	err := initLimitRule(json, config)
@@ -187,7 +210,7 @@ func initLimitRule(json gjson.Result, config *AiTokenRateLimitConfig) error {
 
 	// 处理全局限流配置
 	if hasGlobal {
-		threshold, err := parseGlobalThreshold(globalThresholdResult)
+		threshold, err := parseGlobalThreshold(globalThresholdResult, config.LimitUnit)
 		if err != nil {
 			return fmt.Errorf("failed to parse global_threshold: %w", err)
 		}
@@ -206,7 +229,7 @@ func initLimitRule(json gjson.Result, config *AiTokenRateLimitConfig) error {
 	seenLimitRules := make(map[string]bool)
 
 	for _, item := range items {
-		ruleItem, err := parseLimitRuleItem(item)
+		ruleItem, err := parseLimitRuleItem(item, config.LimitUnit)
 		if err != nil {
 			return fmt.Errorf("failed to parse rule_item in rule_items: %w", err)
 		}
@@ -227,8 +250,8 @@ func initLimitRule(json gjson.Result, config *AiTokenRateLimitConfig) error {
 	return nil
 }
 
-func parseGlobalThreshold(item gjson.Result) (*GlobalThreshold, error) {
-	for timeWindowKey, duration := range timeWindows {
+func parseGlobalThreshold(item gjson.Result, limitUnit string) (*GlobalThreshold, error) {
+	for timeWindowKey, duration := range windowConfig(limitUnit) {
 		q := item.Get(timeWindowKey)
 		if q.Exists() {
 			count := q.Int()
@@ -241,10 +264,10 @@ func parseGlobalThreshold(item gjson.Result) (*GlobalThreshold, error) {
 			}, nil
 		}
 	}
-	return nil, errors.New("one of 'token_per_second', 'token_per_minute', 'token_per_hour', or 'token_per_day' must be set for global_threshold")
+	return nil, errors.New(requiredWindowError(limitUnit, "global_threshold"))
 }
 
-func parseLimitRuleItem(item gjson.Result) (*LimitRuleItem, error) {
+func parseLimitRuleItem(item gjson.Result, limitUnit string) (*LimitRuleItem, error) {
 	var ruleItem LimitRuleItem
 
 	// 根据配置区分限流类型
@@ -303,7 +326,7 @@ func parseLimitRuleItem(item gjson.Result) (*LimitRuleItem, error) {
 	ruleItem.LimitType = limitType
 
 	// 初始化configItems
-	err := initConfigItems(item, &ruleItem)
+	err := initConfigItems(item, &ruleItem, limitUnit)
 	if err != nil {
 		return nil, err
 	}
@@ -311,7 +334,7 @@ func parseLimitRuleItem(item gjson.Result) (*LimitRuleItem, error) {
 	return &ruleItem, nil
 }
 
-func initConfigItems(json gjson.Result, rule *LimitRuleItem) error {
+func initConfigItems(json gjson.Result, rule *LimitRuleItem, limitUnit string) error {
 	limitKeys := json.Get("limit_keys")
 	if !limitKeys.Exists() {
 		return errors.New("missing limit_keys in config")
@@ -360,7 +383,7 @@ func initConfigItems(json gjson.Result, rule *LimitRuleItem) error {
 			itemType = ExactType
 		}
 
-		if configItem, err := createConfigItemFromRate(item, itemType, itemKey, ipNet, regexp); err != nil {
+		if configItem, err := createConfigItemFromRate(item, itemType, itemKey, ipNet, regexp, limitUnit); err != nil {
 			return err
 		} else if configItem != nil {
 			configItems = append(configItems, *configItem)
@@ -370,8 +393,8 @@ func initConfigItems(json gjson.Result, rule *LimitRuleItem) error {
 	return nil
 }
 
-func createConfigItemFromRate(item gjson.Result, itemType LimitConfigItemType, key string, ipNet *iptree.IPTree, regexp *re.Regexp) (*LimitConfigItem, error) {
-	for timeWindowKey, duration := range timeWindows {
+func createConfigItemFromRate(item gjson.Result, itemType LimitConfigItemType, key string, ipNet *iptree.IPTree, regexp *re.Regexp, limitUnit string) (*LimitConfigItem, error) {
+	for timeWindowKey, duration := range windowConfig(limitUnit) {
 		q := item.Get(timeWindowKey)
 		if q.Exists() {
 			count := q.Int()
@@ -388,5 +411,19 @@ func createConfigItemFromRate(item gjson.Result, itemType LimitConfigItemType, k
 			}, nil
 		}
 	}
-	return nil, errors.New("one of 'token_per_second', 'token_per_minute', 'token_per_hour', or 'token_per_day' must be set for key: " + key)
+	return nil, errors.New(requiredWindowError(limitUnit, "key: "+key))
+}
+
+func windowConfig(limitUnit string) map[string]int64 {
+	if limitUnit == LimitUnitAmount {
+		return amountTimeWindows
+	}
+	return tokenTimeWindows
+}
+
+func requiredWindowError(limitUnit string, target string) string {
+	if limitUnit == LimitUnitAmount {
+		return "one of 'amount_per_second', 'amount_per_minute', 'amount_per_hour', or 'amount_per_day' must be set for " + target
+	}
+	return "one of 'token_per_second', 'token_per_minute', 'token_per_hour', or 'token_per_day' must be set for " + target
 }

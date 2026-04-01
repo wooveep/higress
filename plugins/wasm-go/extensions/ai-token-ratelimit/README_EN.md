@@ -6,10 +6,10 @@ description: AI Token Rate Limiting Plugin Configuration Reference
 
 ## Function Description
 
-The `ai-token-ratelimit` plugin implements AI Token rate limiting based on Redis, supporting the following two rate limiting modes:
+The `ai-token-ratelimit` plugin implements Redis-based AI rate limiting and supports two independent dimensions:
 
-- **Rule-level Global Rate Limiting**: Sets a global token rate limit threshold for custom rule groups based on the same `rule_name` and `global_threshold` configurations.
-- **Key-level Dynamic Rate Limiting**: Performs grouped token rate limiting based on dynamic keys in requests (including URL parameters, request headers, client IP, Consumer name, or Cookie fields, etc.).
+- **Rule-level Global Rate Limiting / Key-level Dynamic Rate Limiting**: limit an entire rule group or limit per URL param, header, client IP, consumer, cookie, and other dynamic keys.
+- **`token` / `amount` limit units**: `token` keeps the legacy behavior, while `amount` reads the Portal-projected model pricing hash from Redis and accumulates the real billed cost inside each window.
 
 
 ## Runtime Properties
@@ -23,10 +23,12 @@ Plugin execution priority: `600`
 | Configuration Item       | Type           | Required | Default Value | Description                                                                                     |
 |--------------------------|----------------|----------|---------------|-------------------------------------------------------------------------------------------------|
 | rule_name                | string         | Yes      | -             | Name of the rate limiting rule. The Redis key is assembled based on the rate limiting rule name + rate limiting type + rate limiting key name + actual value corresponding to the rate limiting key. |
+| limit_unit               | string         | No       | `token`       | Limit unit, either `token` or `amount` |
 | global_threshold         | Object         | No, either `global_threshold` or `rule_items` is required | - | Rate limits the entire custom rule group |
 | rule_items               | array of object| No, either `global_threshold` or `rule_items` is required | - | Rate limiting rule items. The first matching `rule_item` in the order of `rule_items` triggers the rate limiting rule, and subsequent rules are ignored. |
 | rejected_code            | int            | No       | 429           | HTTP status code returned when a request is rate-limited                                         |
 | rejected_msg             | string         | No       | Too many requests | Response body returned when a request is rate-limited                                            |
+| price_key_prefix         | string         | No       | `billing:model-price:` | Redis hash prefix used to load model pricing in `amount` mode |
 | redis                    | object         | Yes      | -             | Redis-related configurations                                                                   |
 
 
@@ -38,6 +40,10 @@ Plugin execution priority: `600`
 | token_per_minute      | int  | No, one of `token_per_second`, `token_per_minute`, `token_per_hour`, `token_per_day` is required | - | Allowed number of request tokens per minute   |
 | token_per_hour        | int  | No, one of `token_per_second`, `token_per_minute`, `token_per_hour`, `token_per_day` is required | - | Allowed number of request tokens per hour     |
 | token_per_day         | int  | No, one of `token_per_second`, `token_per_minute`, `token_per_hour`, `token_per_day` is required | - | Allowed number of request tokens per day      |
+| amount_per_second     | int  | No, one of `amount_per_second`, `amount_per_minute`, `amount_per_hour`, `amount_per_day` is required | - | Allowed billed cost per second in `micro_yuan` |
+| amount_per_minute     | int  | No, one of `amount_per_second`, `amount_per_minute`, `amount_per_hour`, `amount_per_day` is required | - | Allowed billed cost per minute in `micro_yuan` |
+| amount_per_hour       | int  | No, one of `amount_per_second`, `amount_per_minute`, `amount_per_hour`, `amount_per_day` is required | - | Allowed billed cost per hour in `micro_yuan` |
+| amount_per_day        | int  | No, one of `amount_per_second`, `amount_per_minute`, `amount_per_hour`, `amount_per_day` is required | - | Allowed billed cost per day in `micro_yuan` |
 
 
 ### Description of Configuration Fields in `rule_items`
@@ -65,6 +71,10 @@ Plugin execution priority: `600`
 | token_per_minute      | int    | No, one of `token_per_second`, `token_per_minute`, `token_per_hour`, `token_per_day` is required | - | Allowed number of request tokens per minute   |
 | token_per_hour        | int    | No, one of `token_per_second`, `token_per_minute`, `token_per_hour`, `token_per_day` is required | - | Allowed number of request tokens per hour     |
 | token_per_day         | int    | No, one of `token_per_second`, `token_per_minute`, `token_per_hour`, `token_per_day` is required | - | Allowed number of request tokens per day      |
+| amount_per_second     | int    | No, one of `amount_per_second`, `amount_per_minute`, `amount_per_hour`, `amount_per_day` is required | - | Allowed billed cost per second in `micro_yuan` |
+| amount_per_minute     | int    | No, one of `amount_per_second`, `amount_per_minute`, `amount_per_hour`, `amount_per_day` is required | - | Allowed billed cost per minute in `micro_yuan` |
+| amount_per_hour       | int    | No, one of `amount_per_second`, `amount_per_minute`, `amount_per_hour`, `amount_per_day` is required | - | Allowed billed cost per hour in `micro_yuan` |
+| amount_per_day        | int    | No, one of `amount_per_second`, `amount_per_minute`, `amount_per_hour`, `amount_per_day` is required | - | Allowed billed cost per day in `micro_yuan` |
 
 
 ### Description of Configuration Fields in `redis`
@@ -90,6 +100,20 @@ global_threshold:
 redis:
   service_name: redis.static
 ```
+
+### Amount-Based Rate Limiting
+
+```yaml
+rule_name: model-cost-limit
+limit_unit: amount
+price_key_prefix: billing:model-price:
+global_threshold:
+  amount_per_minute: 5000000 # 5 CNY per minute in micro_yuan
+redis:
+  service_name: redis.static
+```
+
+In `amount` mode the plugin parses detailed usage from the upstream response, loads the materialized model price hash from Redis, and accumulates the real billed cost instead of raw token counts. The amount window can include cache usage, image tokens, image counts, and fixed request fees.
 
 ### Identify request parameter apikey for differentiated rate limiting
 ```yaml

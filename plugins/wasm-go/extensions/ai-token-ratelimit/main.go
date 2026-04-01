@@ -197,16 +197,49 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, cfg config.AiTokenRateLimitCon
 		ctx.SetContext(tokenusage.CtxKeyInputToken, usage.InputToken)
 		ctx.SetContext(tokenusage.CtxKeyOutputToken, usage.OutputToken)
 	}
+	detailedUsage := mergeDetailedUsageFromResponse(ctx, data)
+	if detailedUsage.InputTokens > 0 {
+		ctx.SetContext(tokenusage.CtxKeyInputToken, detailedUsage.InputTokens)
+	}
+	if detailedUsage.OutputTokens > 0 {
+		ctx.SetContext(tokenusage.CtxKeyOutputToken, detailedUsage.OutputTokens)
+	}
 	if endOfStream {
+		limitRedisContext, ok := ctx.GetContext(LimitRedisContextKey).(LimitRedisContext)
+		if !ok {
+			return data
+		}
+		if cfg.LimitUnit == config.LimitUnitAmount {
+			metrics := getDetailedUsageFromContext(ctx)
+			modelName := resolveAmountModelName(ctx, metrics)
+			if modelName == "" {
+				return data
+			}
+			_ = cfg.RedisClient.Command([]interface{}{"hgetall", cfg.PriceKeyPrefix + modelName}, func(response resp.Value) {
+				price, ok := parseModelPriceResponse(modelName, response)
+				if err := response.Error(); err != nil || !ok {
+					if err != nil {
+						log.Errorf("load amount mode price failed: %v", err)
+					}
+					return
+				}
+				cost := calculateAmountCost(metrics, price)
+				if cost <= 0 {
+					return
+				}
+				keys := []interface{}{limitRedisContext.key}
+				args := []interface{}{limitRedisContext.count, limitRedisContext.window, cost}
+				if err := cfg.RedisClient.Eval(ResponsePhaseFixedWindowScript, 1, keys, args, nil); err != nil {
+					log.Errorf("redis call failed: %v", err)
+				}
+			})
+			return data
+		}
 		if ctx.GetContext(tokenusage.CtxKeyInputToken) == nil || ctx.GetContext(tokenusage.CtxKeyOutputToken) == nil {
 			return data
 		}
 		inputToken := ctx.GetContext(tokenusage.CtxKeyInputToken).(int64)
 		outputToken := ctx.GetContext(tokenusage.CtxKeyOutputToken).(int64)
-		limitRedisContext, ok := ctx.GetContext(LimitRedisContextKey).(LimitRedisContext)
-		if !ok {
-			return data
-		}
 		keys := []interface{}{limitRedisContext.key}
 		args := []interface{}{limitRedisContext.count, limitRedisContext.window, inputToken + outputToken}
 		err := cfg.RedisClient.Eval(ResponsePhaseFixedWindowScript, 1, keys, args, nil)

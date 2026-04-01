@@ -39,7 +39,8 @@ func TestParseAiTokenRateLimitConfig(t *testing.T) {
 				}
 			}`,
 			expected: AiTokenRateLimitConfig{
-				RuleName: "global-route-limit",
+				RuleName:  "global-route-limit",
+				LimitUnit: LimitUnitToken,
 				GlobalThreshold: &GlobalThreshold{
 					Count:      100,
 					TimeWindow: Second,
@@ -57,7 +58,8 @@ func TestParseAiTokenRateLimitConfig(t *testing.T) {
 				}
 			}`,
 			expected: AiTokenRateLimitConfig{
-				RuleName: "global-route-limit",
+				RuleName:  "global-route-limit",
+				LimitUnit: LimitUnitToken,
 				GlobalThreshold: &GlobalThreshold{
 					Count:      1000,
 					TimeWindow: SecondsPerMinute,
@@ -95,7 +97,8 @@ func TestParseAiTokenRateLimitConfig(t *testing.T) {
 				]
 			}`,
 			expected: AiTokenRateLimitConfig{
-				RuleName: "rule-based-limit",
+				RuleName:  "rule-based-limit",
+				LimitUnit: LimitUnitToken,
 				RuleItems: []LimitRuleItem{
 					{
 						LimitType: LimitByHeaderType,
@@ -134,7 +137,8 @@ func TestParseAiTokenRateLimitConfig(t *testing.T) {
 				]
 			}`,
 			expected: AiTokenRateLimitConfig{
-				RuleName: "multi-rule-limit",
+				RuleName:  "multi-rule-limit",
+				LimitUnit: LimitUnitToken,
 				RuleItems: []LimitRuleItem{
 					{
 						LimitType: LimitByParamType,
@@ -190,7 +194,8 @@ func TestParseAiTokenRateLimitConfig(t *testing.T) {
 				"global_threshold": {"token_per_second": 100}
 			}`,
 			expected: AiTokenRateLimitConfig{
-				RuleName: "custom-reject",
+				RuleName:  "custom-reject",
+				LimitUnit: LimitUnitToken,
 				GlobalThreshold: &GlobalThreshold{
 					Count:      100,
 					TimeWindow: Second,

@@ -86,6 +86,28 @@ Attribute 配置说明:
 - `reasoning_tokens` 和 `cached_tokens` 是从 token details 中提取的便捷字段，适用于 OpenAI Chat Completions API
 - `input_token_details` 和 `output_token_details` 会以 JSON 字符串形式记录完整的 token 详情对象
 
+### 细分 usage 归一化
+
+插件会把 Anthropic、OpenAI、Gemini 等上游返回的 usage 结构统一为内部口径，并写入 metric、ai_log 和 span。当前新增的细分维度包括：
+
+- `cache_creation_input_tokens`
+- `cache_creation_5m_input_tokens`
+- `cache_creation_1h_input_tokens`
+- `cache_read_input_tokens`
+- `input_image_tokens`
+- `output_image_tokens`
+- `input_image_count`
+- `output_image_count`
+- `request_count`
+- `cache_ttl`
+
+其中：
+
+- Claude SSE 会合并 `message_start` 与 `message_delta`
+- OpenAI `input_token_details.cached_tokens` 会归一化为 `cache_read_input_tokens`
+- Gemini 会根据 `promptTokensDetails / candidatesTokensDetails` 拆分图像 token，并扣除 `cachedContentTokenCount`
+- 当 provider 只返回聚合 `cache_creation_input_tokens` 时，会结合请求侧 TTL 推导到 `5m/1h` 桶
+
 ## 配置示例
 
 如果希望在网关访问日志中记录 ai-statistic 相关的统计值，需要修改 log_format，在原 log_format 基础上添加一个新字段，示例如下：
