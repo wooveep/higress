@@ -104,7 +104,7 @@ aigateway-portal:
     host: mysql-server
   image:
     repository: aigateway/portal
-    tag: "0.2.0-dev-20260327030541"
+    tag: "0.2.0-dev-20260410135707"
     pullPolicy: IfNotPresent
   service:
     type: LoadBalancer
