@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 HIGRESS_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 ROOT_DIR="$(cd -- "${HIGRESS_DIR}/.." && pwd)"
-CONSOLE_DIR="${CONSOLE_DIR:-$(cd -- "${HIGRESS_DIR}/../higress-console" && pwd)}"
+CONSOLE_DIR="${CONSOLE_DIR:-$(cd -- "${HIGRESS_DIR}/../aigateway-console" && pwd)}"
 PLUGIN_SERVER_DIR="${PLUGIN_SERVER_DIR:-$(cd -- "${HIGRESS_DIR}/../plugin-server" && pwd)}"
 PORTAL_DIR="${PORTAL_DIR:-${HIGRESS_DIR}/../aigateway-portal}"
 
@@ -22,9 +22,24 @@ WRAPPER_VALUES_FILE="${WRAPPER_VALUES_FILE:-${DEFAULT_WRAPPER_VALUES_FILE}}"
 CORE_VALUES_FILE="${CORE_VALUES_FILE:-${SCRIPT_DIR}/core/values-production-gray.yaml}"
 CONSOLE_VALUES_FILE="${CONSOLE_VALUES_FILE:-${CONSOLE_DIR}/helm/values-production-gray.yaml}"
 
-CONSOLE_PLUGIN_PROPERTIES_FILE="${CONSOLE_PLUGIN_PROPERTIES_FILE:-${CONSOLE_DIR}/backend/sdk/src/main/resources/plugins/plugins.properties}"
+DEFAULT_CONSOLE_PLUGIN_RESOURCE_DIR=""
+for candidate in \
+  "${CONSOLE_DIR}/backend/resource/public/plugin" \
+  "${CONSOLE_DIR}/backend-java-legacy/sdk/src/main/resources/plugins" \
+  "${CONSOLE_DIR}/backend/sdk/src/main/resources/plugins"
+do
+  if [[ -f "${candidate}/plugins.properties" ]]; then
+    DEFAULT_CONSOLE_PLUGIN_RESOURCE_DIR="${candidate}"
+    break
+  fi
+done
+if [[ -z "${DEFAULT_CONSOLE_PLUGIN_RESOURCE_DIR}" ]]; then
+  DEFAULT_CONSOLE_PLUGIN_RESOURCE_DIR="${CONSOLE_DIR}/backend/resource/public/plugin"
+fi
+
+CONSOLE_PLUGIN_RESOURCE_DIR="${CONSOLE_PLUGIN_RESOURCE_DIR:-${DEFAULT_CONSOLE_PLUGIN_RESOURCE_DIR}}"
+CONSOLE_PLUGIN_PROPERTIES_FILE="${CONSOLE_PLUGIN_PROPERTIES_FILE:-${CONSOLE_PLUGIN_RESOURCE_DIR}/plugins.properties}"
 PLUGIN_SERVER_PROPERTIES_FILE="${PLUGIN_SERVER_PROPERTIES_FILE:-${PLUGIN_SERVER_DIR}/plugins.properties}"
-CONSOLE_PLUGIN_RESOURCE_DIR="${CONSOLE_PLUGIN_RESOURCE_DIR:-${CONSOLE_DIR}/backend/sdk/src/main/resources/plugins}"
 SYNC_PLUGIN_VERSIONS_SCRIPT="${SYNC_PLUGIN_VERSIONS_SCRIPT:-${SCRIPT_DIR}/sync-plugin-versions.py}"
 FORCE_SOURCE_VERSION_PLUGINS="${FORCE_SOURCE_VERSION_PLUGINS:-ai-quota}"
 
@@ -64,8 +79,8 @@ Examples:
 Environment overrides:
   WRAPPER_VALUES_FILE           Parent chart values file. Default: higress/helm/higress/values-production-gray.yaml
   CORE_VALUES_FILE              higress-core values file. Default: helm/core/values-production-gray.yaml
-  CONSOLE_VALUES_FILE           aigateway-console values file. Default: ../higress-console/helm/values-production-gray.yaml
-  CONSOLE_DIR                   Path to the aigateway-console repo. Default: ../higress-console
+  CONSOLE_VALUES_FILE           aigateway-console values file. Default: ../aigateway-console/helm/values-production-gray.yaml
+  CONSOLE_DIR                   Path to the aigateway-console repo. Default: ../aigateway-console
   PORTAL_DIR                    Path to the aigateway-portal repo. Default: ../aigateway-portal
   PLUGIN_SERVER_DIR             Path to the plugin-server repo. Default: ../plugin-server
   ARCH                          Target architecture. Default: amd64
@@ -227,27 +242,52 @@ has_component() {
   [[ "${padded}" == *",${wanted},"* ]]
 }
 
-for file in "${WRAPPER_VALUES_FILE}" "${CORE_VALUES_FILE}" "${CONSOLE_VALUES_FILE}" "${CONSOLE_PLUGIN_PROPERTIES_FILE}" "${PLUGIN_SERVER_PROPERTIES_FILE}"; do
+for file in "${WRAPPER_VALUES_FILE}" "${CORE_VALUES_FILE}" "${CONSOLE_VALUES_FILE}"; do
   if [[ ! -f "${file}" ]]; then
     echo "Required file not found: ${file}" >&2
     exit 1
   fi
 done
 
-if [[ ! -f "${SYNC_PLUGIN_VERSIONS_SCRIPT}" ]]; then
+if (has_component "plugins" || has_component "plugin-server") && [[ ! -f "${CONSOLE_PLUGIN_PROPERTIES_FILE}" ]]; then
+  echo "Required file not found: ${CONSOLE_PLUGIN_PROPERTIES_FILE}" >&2
+  exit 1
+fi
+
+if (has_component "plugins" || has_component "plugin-server") && [[ ! -f "${PLUGIN_SERVER_PROPERTIES_FILE}" ]]; then
+  echo "Required file not found: ${PLUGIN_SERVER_PROPERTIES_FILE}" >&2
+  exit 1
+fi
+
+if (has_component "plugins" || has_component "plugin-server") && [[ ! -f "${SYNC_PLUGIN_VERSIONS_SCRIPT}" ]]; then
   echo "Required file not found: ${SYNC_PLUGIN_VERSIONS_SCRIPT}" >&2
   exit 1
 fi
 
-for dir in "${CONSOLE_DIR}" "${PLUGIN_SERVER_DIR}" "${CONSOLE_PLUGIN_RESOURCE_DIR}"; do
+for dir in "${CONSOLE_DIR}"; do
   if [[ ! -d "${dir}" ]]; then
     echo "Required directory not found: ${dir}" >&2
     exit 1
   fi
 done
 
+if (has_component "plugins" || has_component "plugin-server") && [[ ! -d "${PLUGIN_SERVER_DIR}" ]]; then
+  echo "Required directory not found: ${PLUGIN_SERVER_DIR}" >&2
+  exit 1
+fi
+
+if (has_component "plugins" || has_component "plugin-server") && [[ ! -d "${CONSOLE_PLUGIN_RESOURCE_DIR}" ]]; then
+  echo "Required directory not found: ${CONSOLE_PLUGIN_RESOURCE_DIR}" >&2
+  exit 1
+fi
+
 if has_component "portal" && [[ ! -d "${PORTAL_DIR}" ]]; then
   echo "Required directory not found: ${PORTAL_DIR}" >&2
+  exit 1
+fi
+
+if has_component "console" && [[ ! -d "${PORTAL_DIR}/backend" ]]; then
+  echo "Required directory not found: ${PORTAL_DIR}/backend" >&2
   exit 1
 fi
 
@@ -282,7 +322,7 @@ sync_plugin_versions() {
   PLUGIN_VERSIONS_SYNCED=true
 }
 
-if has_component "console" || has_component "plugins" || has_component "plugin-server"; then
+if has_component "plugins" || has_component "plugin-server"; then
   sync_plugin_versions
 fi
 
@@ -491,12 +531,27 @@ build_pilot() {
 build_console() {
   local target_image="${CONSOLE_REPOSITORY}:${CONSOLE_TAG}"
 
-  # Force a fresh frontend bundle to avoid stale static artifacts in the image.
+  # Rebuild the frontend bundle and copy it into the Go backend's static resource directory
+  # before building the final console image.
   run rm -rf "${CONSOLE_DIR}/frontend/.ice" "${CONSOLE_DIR}/frontend/build"
-  run rm -rf "${CONSOLE_DIR}/backend/console/src/main/resources/static"
+  run rm -rf "${CONSOLE_DIR}/backend/resource/public/html"
+  run mkdir -p "${CONSOLE_DIR}/backend/resource/public/html"
+
+  run_in_dir "${CONSOLE_DIR}/frontend" \
+    npm install
+  run_in_dir "${CONSOLE_DIR}/frontend" \
+    npm run build
+
+  run cp -R "${CONSOLE_DIR}/frontend/build/." "${CONSOLE_DIR}/backend/resource/public/html/"
 
   run_in_dir "${CONSOLE_DIR}/backend" \
-    env IMAGE_NAME="${target_image}" VERSION="${CONSOLE_TAG}" ./build.sh
+    docker build \
+      --platform "linux/${ARCH}" \
+      --build-context "portal_backend=${PORTAL_DIR}/backend" \
+      --build-arg TARGETARCH="${ARCH}" \
+      -f Dockerfile.monorepo \
+      -t "${target_image}" \
+      .
 }
 
 build_portal() {
