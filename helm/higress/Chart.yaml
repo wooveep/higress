@@ -12,7 +12,7 @@ sources:
 dependencies:
 - name: higress-core
   repository: "file://../core"
-  version: 2.2.0
+  version: 2.2.1
   condition: higress-core.enabled
 - name: aigateway-console
   alias: aigateway-console

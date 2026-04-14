@@ -142,13 +142,13 @@ const (
 	ToolCallsPathStreaming    = "choices.0.delta.tool_calls"
 
 	// Claude/Anthropic tool calls paths (streaming)
-	ClaudeEventType              = "type"
-	ClaudeContentBlockType       = "content_block.type"
-	ClaudeContentBlockID         = "content_block.id"
-	ClaudeContentBlockName       = "content_block.name"
-	ClaudeContentBlockInput      = "content_block.input"
-	ClaudeDeltaPartialJSON       = "delta.partial_json"
-	ClaudeIndex                  = "index"
+	ClaudeEventType         = "type"
+	ClaudeContentBlockType  = "content_block.type"
+	ClaudeContentBlockID    = "content_block.id"
+	ClaudeContentBlockName  = "content_block.name"
+	ClaudeContentBlockInput = "content_block.input"
+	ClaudeDeltaPartialJSON  = "delta.partial_json"
+	ClaudeIndex             = "index"
 
 	// Reasoning paths
 	ReasoningPathNonStreaming = "choices.0.message.reasoning_content"
@@ -164,10 +164,10 @@ func getDefaultAttributes() []Attribute {
 	return []Attribute{
 		// Extract complete conversation history from request body
 		{
-			Key:        "messages",
+			Key:         "messages",
 			ValueSource: RequestBody,
-			Value:      "messages",
-			ApplyToLog: true,
+			Value:       "messages",
+			ApplyToLog:  true,
 		},
 		// Built-in attributes (no value_source needed, will be auto-extracted)
 		{
@@ -269,10 +269,10 @@ func extractSessionId(customHeader string) string {
 
 // ToolCall represents a single tool call in the response
 type ToolCall struct {
-	Index    int                    `json:"index,omitempty"`
-	ID       string                 `json:"id,omitempty"`
-	Type     string                 `json:"type,omitempty"`
-	Function ToolCallFunction       `json:"function,omitempty"`
+	Index    int              `json:"index,omitempty"`
+	ID       string           `json:"id,omitempty"`
+	Type     string           `json:"type,omitempty"`
+	Function ToolCallFunction `json:"function,omitempty"`
 }
 
 // ToolCallFunction represents the function details in a tool call
@@ -307,7 +307,7 @@ func extractStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuffer) *S
 
 		for _, tcResult := range toolCallsResult.Array() {
 			index := int(tcResult.Get("index").Int())
-			
+
 			// Get or create tool call entry
 			tc, exists := buffer.ToolCalls[index]
 			if !exists {
@@ -360,10 +360,10 @@ func extractClaudeStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuff
 			contentBlockType := gjson.GetBytes(chunk, ClaudeContentBlockType)
 			if contentBlockType.Exists() && contentBlockType.String() == "tool_use" {
 				index := int(gjson.GetBytes(chunk, ClaudeIndex).Int())
-				
+
 				// Create tool call entry
 				tc := &ToolCall{Index: index}
-				
+
 				// Extract id and name
 				if id := gjson.GetBytes(chunk, ClaudeContentBlockID).String(); id != "" {
 					tc.ID = id
@@ -372,11 +372,11 @@ func extractClaudeStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuff
 					tc.Function.Name = name
 				}
 				tc.Type = "tool_use"
-				
+
 				buffer.ToolCalls[index] = tc
 				buffer.InToolBlock[index] = true
 				buffer.ArgumentsBuffer[index] = ""
-				
+
 				// Try to extract initial input if present
 				if input := gjson.GetBytes(chunk, ClaudeContentBlockInput); input.Exists() {
 					if inputMap, ok := input.Value().(map[string]interface{}); ok {
@@ -403,7 +403,7 @@ func extractClaudeStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuff
 			index := int(gjson.GetBytes(chunk, ClaudeIndex).Int())
 			if buffer.InToolBlock[index] {
 				buffer.InToolBlock[index] = false
-				
+
 				// Parse accumulated arguments and set them
 				if tc, exists := buffer.ToolCalls[index]; exists {
 					tc.Function.Arguments = buffer.ArgumentsBuffer[index]
@@ -565,7 +565,7 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 	if configJson.Get("value_length_limit").Exists() {
 		config.valueLengthLimit = int(configJson.Get("value_length_limit").Int())
 	} else {
-		config.valueLengthLimit = 4000
+		config.valueLengthLimit = 32000
 	}
 
 	// Parse attributes or use defaults
@@ -856,7 +856,7 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 			setSpanAttribute(ArmsModelName, usage.Model)
 			setSpanAttribute(ArmsInputToken, usage.InputToken)
 			setSpanAttribute(ArmsOutputToken, usage.OutputToken)
-			
+
 			// Set token details to context for later use in attributes
 			if len(usage.InputTokenDetails) > 0 {
 				ctx.SetContext(tokenusage.CtxKeyInputTokenDetails, usage.InputTokenDetails)
@@ -864,6 +864,9 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 			if len(usage.OutputTokenDetails) > 0 {
 				ctx.SetContext(tokenusage.CtxKeyOutputTokenDetails, usage.OutputTokenDetails)
 			}
+
+			// Write once
+			_ = ctx.WriteUserAttributeToLogWithKey(wrapper.AILogKey)
 		}
 		applyDetailedUsageAttributes(ctx, mergeDetailedUsageFromResponse(ctx, data))
 	}
@@ -921,7 +924,7 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
 			setSpanAttribute(ArmsInputToken, usage.InputToken)
 			setSpanAttribute(ArmsOutputToken, usage.OutputToken)
 			setSpanAttribute(ArmsTotalToken, usage.TotalToken)
-			
+
 			// Set token details to context for later use in attributes
 			if len(usage.InputTokenDetails) > 0 {
 				ctx.SetContext(tokenusage.CtxKeyInputTokenDetails, usage.InputTokenDetails)
@@ -990,7 +993,7 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 		if (value == nil || value == "") && attribute.DefaultValue != "" {
 			value = attribute.DefaultValue
 		}
-		
+
 		// Format value for logging/span
 		var formattedValue interface{}
 		switch v := value.(type) {
@@ -1009,7 +1012,7 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 				formattedValue = fmt.Sprint(value)[:config.valueLengthLimit/2] + " [truncated] " + fmt.Sprint(value)[len(fmt.Sprint(value))-config.valueLengthLimit/2:]
 			}
 		}
-		
+
 		log.Debugf("[attribute] source type: %s, key: %s, value: %+v", source, key, formattedValue)
 		if attribute.ApplyToLog {
 			if attribute.AsSeparateLogField {
@@ -1139,7 +1142,7 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 			// Also try Claude format (both formats can be checked)
 			buffer = extractClaudeStreamingToolCalls(body, buffer)
 			ctx.SetContext(CtxStreamingToolCallsBuffer, buffer)
-			
+
 			// Also set tool_calls to user attributes so they appear in ai_log
 			toolCalls := getToolCallsFromBuffer(buffer)
 			if len(toolCalls) > 0 {
