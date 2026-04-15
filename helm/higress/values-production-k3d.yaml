@@ -76,7 +76,7 @@ aigateway-console:
     port: 8080
   image:
     repository: aigateway/console
-    tag: "2.2.0-dev-20260415182840"
+    tag: "2.2.0-dev-20260415214151"
     pullPolicy: IfNotPresent
   pluginServer:
     serviceName: aigateway-plugin-server
@@ -105,7 +105,7 @@ aigateway-portal:
     host: mysql-server
   image:
     repository: aigateway/portal
-    tag: "0.2.0-dev-20260415182840"
+    tag: "0.2.0-dev-20260415214151"
     pullPolicy: IfNotPresent
   service:
     type: LoadBalancer
