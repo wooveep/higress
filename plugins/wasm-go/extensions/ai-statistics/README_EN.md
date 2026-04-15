@@ -172,6 +172,12 @@ irate(route_upstream_model_consumer_metric_llm_service_duration[2m])
 irate(route_upstream_model_consumer_metric_llm_duration_count[2m])
 ```
 
+#### AI Dashboard data semantics
+
+- Token cards and trend charts in `/ai/dashboard` continue to consume the Prometheus counters exported by this plugin, including `route_upstream_model_consumer_metric_total_token`, `input_token`, and the detailed cache/image token metrics.
+- Failed requests, slow requests, and estimated cost in `/ai/dashboard` come from the Console-side `billing_usage_event` aggregation so the dashboard can show request-level anomaly and billing views.
+- This dashboard refactor does not change the token extraction logic, metric names, or Redis/quota-related runtime behavior of `ai-statistics`.
+
 #### Log
 
 ```json

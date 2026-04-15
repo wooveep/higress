@@ -18,6 +18,8 @@ global:
       image:
         repository: aigateway/loki
         tag: 2.9.4
+      pvc:
+        enabled: false
     promtail:
       image:
         repository: aigateway/promtail
@@ -79,7 +81,7 @@ aigateway-console:
     port: 8080
   image:
     repository: aigateway/console
-    tag: "2.2.0-dev-20260327030541"
+    tag: "2.2.0-dev-20260415182840"
     pullPolicy: IfNotPresent
   portalDatabase:
     enabled: true
@@ -97,7 +99,7 @@ aigateway-portal:
     host: mysql-server
   image:
     repository: aigateway/portal
-    tag: "0.2.0-dev-20260410135707"
+    tag: "0.2.0-dev-20260415182840"
     pullPolicy: IfNotPresent
   service:
     type: LoadBalancer

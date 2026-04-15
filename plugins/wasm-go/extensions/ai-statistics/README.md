@@ -175,6 +175,12 @@ irate(route_upstream_model_consumer_metric_llm_service_duration[2m])
 irate(route_upstream_model_consumer_metric_llm_duration_count[2m])
 ```
 
+#### AI Dashboard 数据口径说明
+
+- `/ai/dashboard` 中与 Token 相关的卡片和趋势图继续消费本插件输出的 Prometheus counter，例如 `route_upstream_model_consumer_metric_total_token`、`input_token`、缓存/图像 token 等指标。
+- `/ai/dashboard` 中的失败请求、慢请求和成本估算来自 Console 侧聚合的 `billing_usage_event`，用于补齐请求级异常与记账视图。
+- 本次 Dashboard 改造不会修改 `ai-statistics` 的 token 提取逻辑、指标命名或 Redis / 配额链路。
+
 #### 日志
 
 ```json
