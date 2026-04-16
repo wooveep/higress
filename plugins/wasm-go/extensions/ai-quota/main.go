@@ -35,6 +35,7 @@ const (
 	defaultUserUsageKeyPrefix    = "billing:quota-usage:user:"
 	defaultKeyUsageKeyPrefix     = "billing:quota-usage:key:"
 	defaultQuotaNoopPrefix       = "billing:quota:noop:"
+	ctxKeyAmountEventDispatched  = "amount_event_dispatched"
 	ctxKeyRequestModelPrice      = "request_model_price"
 	ctxKeyRequestModelName       = "request_model_name"
 	ctxKeyRequestAPIKeyID        = "request_api_key_id"
@@ -72,6 +73,7 @@ func init() {
 		wrapper.ProcessRequestHeaders(onHttpRequestHeaders),
 		wrapper.ProcessRequestBody(onHttpRequestBody),
 		wrapper.ProcessStreamingResponseBody(onHttpStreamingResponseBody),
+		wrapper.ProcessStreamDone(onHttpStreamDone),
 	)
 }
 
@@ -371,6 +373,41 @@ func onHttpStreamingResponseBody(ctx wrapper.HttpContext, config QuotaConfig, da
 	return data
 }
 
+func onHttpStreamDone(ctx wrapper.HttpContext, config QuotaConfig) {
+	if config.QuotaUnit != QuotaUnitAmount || isAmountEventDispatched(ctx) {
+		return
+	}
+
+	chatMode, ok := ctx.GetContext("chatMode").(ChatMode)
+	if !ok || chatMode != ChatModeCompletion {
+		return
+	}
+
+	consumer, ok := ctx.GetContext("consumer").(string)
+	if !ok || strings.TrimSpace(consumer) == "" {
+		return
+	}
+
+	statusCode := getResponseStatusCode()
+	if statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
+		statusCode = 499
+	}
+
+	modelName := resolveEventModelName(ctx)
+	if modelName == "" {
+		modelName = "unknown"
+	}
+
+	metrics := getDetailedUsageFromContext(ctx)
+	if metrics.TotalTokens() > 0 || metrics.InputImageCount > 0 || metrics.OutputImageCount > 0 {
+		emitAmountInterruptedUsageEvent(ctx, config, consumer, modelName, metrics, statusCode)
+		return
+	}
+
+	emitAmountAuditEvent(ctx, config, consumer, modelName, "failed", "missing", statusCode,
+		"stream_interrupted", "Streaming response terminated before final billable usage was emitted.")
+}
+
 func deniedNoKeyAuthData() types.Action {
 	util.SendResponse(http.StatusUnauthorized, "ai-quota.no_key", "text/plain", "Request denied by ai quota check. No Key Authentication information found.")
 	return types.ActionContinue
@@ -622,12 +659,40 @@ func checkAmountQuota(ctx wrapper.HttpContext, config QuotaConfig, consumer stri
 }
 
 func emitAmountUsageEvent(ctx wrapper.HttpContext, config QuotaConfig, consumer string, modelName string, metrics detailedUsageMetrics, httpStatus int) {
+	emitAmountUsageEventWithStatus(ctx, config, consumer, modelName, metrics, httpStatus, "success", "", "")
+}
+
+func emitAmountInterruptedUsageEvent(ctx wrapper.HttpContext, config QuotaConfig, consumer string, modelName string, metrics detailedUsageMetrics, httpStatus int) {
+	emitAmountUsageEventWithStatus(
+		ctx,
+		config,
+		consumer,
+		modelName,
+		metrics,
+		httpStatus,
+		"failed",
+		"stream_interrupted",
+		"Streaming response terminated before final billable usage was emitted; charged with partial billable usage captured before interruption.",
+	)
+}
+
+func emitAmountUsageEventWithStatus(
+	ctx wrapper.HttpContext,
+	config QuotaConfig,
+	consumer string,
+	modelName string,
+	metrics detailedUsageMetrics,
+	httpStatus int,
+	requestStatus string,
+	errorCode string,
+	errorMessage string,
+) {
 	if storedPrice, ok := ctx.GetContext(ctxKeyRequestModelPrice).(modelPrice); ok {
 		billingModelName := normalizeModelName(storedPrice.ModelID)
 		if billingModelName == "" {
 			billingModelName = preferredBillingModelName(ctx.GetStringContext(ctxKeyRequestModelName, ""), modelName)
 		}
-		dispatchAmountCharge(ctx, config, consumer, billingModelName, storedPrice, metrics, httpStatus)
+		dispatchAmountCharge(ctx, config, consumer, billingModelName, storedPrice, metrics, httpStatus, requestStatus, errorCode, errorMessage)
 		return
 	}
 
@@ -635,21 +700,34 @@ func emitAmountUsageEvent(ctx wrapper.HttpContext, config QuotaConfig, consumer 
 	_ = config.redisClient.Command([]interface{}{"hgetall", priceKey}, func(response resp.Value) {
 		price, ok := parseModelPriceResponse(modelName, response)
 		if err := response.Error(); err != nil || !ok {
-			emitAmountAuditEvent(ctx, config, consumer, modelName, "success", "missing", httpStatus,
+			emitAmountAuditEvent(ctx, config, consumer, modelName, requestStatus, "missing", httpStatus,
 				"model_price_missing", "Successful response could not find model pricing.")
 			return
 		}
-		dispatchAmountCharge(ctx, config, consumer, modelName, price, metrics, httpStatus)
+		dispatchAmountCharge(ctx, config, consumer, modelName, price, metrics, httpStatus, requestStatus, errorCode, errorMessage)
 	})
 }
 
-func dispatchAmountCharge(ctx wrapper.HttpContext, config QuotaConfig, consumer string, modelName string, price modelPrice, metrics detailedUsageMetrics, httpStatus int) {
+func dispatchAmountCharge(
+	ctx wrapper.HttpContext,
+	config QuotaConfig,
+	consumer string,
+	modelName string,
+	price modelPrice,
+	metrics detailedUsageMetrics,
+	httpStatus int,
+	requestStatus string,
+	errorCode string,
+	errorMessage string,
+) {
 	cost := calculateAmountCost(metrics, price)
 	dispatchAmountEvent(ctx, config, amountEvent{
 		Consumer:                   consumer,
 		ModelName:                  modelName,
-		RequestStatus:              "success",
+		RequestStatus:              requestStatus,
 		UsageStatus:                "parsed",
+		ErrorCode:                  errorCode,
+		ErrorMessage:               errorMessage,
 		HTTPStatus:                 httpStatus,
 		InputToken:                 metrics.InputTokens,
 		OutputToken:                metrics.OutputTokens,
@@ -775,6 +853,7 @@ func dispatchAmountEvent(ctx wrapper.HttpContext, config QuotaConfig, event amou
 		monthlyTTL,
 	)
 	_ = config.redisClient.Eval(amountChargeScript, len(keys), keys, args, nil)
+	markAmountEventDispatched(ctx)
 }
 
 func buildAmountChargeArgs(cost int64, eventID, requestID, traceID, consumer, routeName, requestPath, requestKind, modelName, requestStatus, usageStatus string, httpStatus int, errorCode, errorMessage string, inputToken, outputToken, totalToken, cacheCreationInputToken, cacheCreation5mInputToken, cacheCreation1hInputToken, cacheReadInputToken, inputImageToken, outputImageToken, inputImageCount, outputImageCount, requestCount int64, cacheTTL, inputTokenDetailsJSON, outputTokenDetailsJSON, providerUsageJSON string, priceVersion int64, apiKeyID string, startedAt time.Time, finishedAt time.Time, occurredAt time.Time, dailyTTL int64, weeklyTTL int64, monthlyTTL int64) []interface{} {
@@ -1017,6 +1096,16 @@ func getResponseStatusCode() int {
 	return statusCode
 }
 
+func isAmountEventDispatched(ctx wrapper.HttpContext) bool {
+	value := ctx.GetContext(ctxKeyAmountEventDispatched)
+	dispatched, ok := value.(bool)
+	return ok && dispatched
+}
+
+func markAmountEventDispatched(ctx wrapper.HttpContext) {
+	ctx.SetContext(ctxKeyAmountEventDispatched, true)
+}
+
 func parseRFC3339Time(value string) time.Time {
 	if strings.TrimSpace(value) == "" {
 		return time.Now().UTC()
@@ -1177,11 +1266,10 @@ if redis.call('SETNX', dedupKey, ARGV[2]) == 0 then
   return {0, redis.call('GET', balanceKey) or '0'}
 end
 redis.call('EXPIRE', dedupKey, 86400)
-local requestStatus = ARGV[10]
 local usageStatus = ARGV[11]
 local apiKeyId = ARGV[32]
 local nextBalance = redis.call('GET', balanceKey) or '0'
-if cost and cost > 0 and requestStatus == 'success' and usageStatus == 'parsed' then
+if cost and cost > 0 and usageStatus == 'parsed' then
   nextBalance = redis.call('DECRBY', balanceKey, cost)
   redis.call('INCRBY', userTotalKey, cost)
   redis.call('INCRBY', userDailyKey, cost)
