@@ -4,8 +4,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
-# Prefer the chart colocated with this script (higress/helm/higress).
-# Fall back to the legacy monorepo-level helm path when needed.
+source "${ROOT_DIR}/scripts/dev-shell-lib.sh"
+
 LOCAL_CHART_DIR="${SCRIPT_DIR}/higress"
 LEGACY_CHART_DIR="${ROOT_DIR}/helm/higress"
 if [[ -d "${LOCAL_CHART_DIR}" ]]; then
@@ -13,11 +13,8 @@ if [[ -d "${LOCAL_CHART_DIR}" ]]; then
 else
   DEFAULT_CHART_DIR="${LEGACY_CHART_DIR}"
 fi
-CHART_DIR="${CHART_DIR:-${DEFAULT_CHART_DIR}}"
-if [[ -d "${CHART_DIR}" ]]; then
-  CHART_DIR="$(cd -- "${CHART_DIR}" && pwd -P)"
-fi
 
+CHART_DIR="${CHART_DIR:-${DEFAULT_CHART_DIR}}"
 DEFAULT_VALUES_FILE="${CHART_DIR}/values-production-k3d.yaml"
 if [[ ! -f "${DEFAULT_VALUES_FILE}" ]]; then
   DEFAULT_VALUES_FILE="${CHART_DIR}/values-production-gray.yaml"
@@ -35,25 +32,22 @@ SKIP_LOAD=false
 SKIP_DEPLOY=false
 
 usage() {
-  cat <<'USAGE'
+  cat <<'EOF'
 Usage:
   redeploy-k3d.sh [options]
 
 Options:
-  --values <path>         Helm values file (default: higress/helm/higress/values-production-k3d.yaml)
+  --values <path>         Helm values file
   --namespace <name>      Kubernetes namespace (default: aigateway-system)
   --release <name>        Helm release name (default: aigateway)
   --components <list>     Components passed to build-local-images.sh
   --timeout <duration>    Helm/kubectl rollout timeout (default: 15m)
-  --cluster <name>        k3d cluster name (default: inferred from current kubectl context)
+  --cluster <name>        k3d cluster name (default: inferred from current context)
   --skip-build            Skip local image build
   --skip-load             Skip k3d image import
   --skip-deploy           Skip helm upgrade + rollout restart
   -h, --help              Show this help
-
-Environment overrides:
-  CHART_DIR, VALUES_FILE, NAMESPACE, RELEASE_NAME, BUILD_COMPONENTS, HELM_TIMEOUT, K3D_CLUSTER
-USAGE
+EOF
 }
 
 while [[ $# -gt 0 ]]; do
@@ -99,19 +93,21 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     *)
-      echo "Unknown argument: $1" >&2
-      usage >&2
-      exit 1
+      dev_die "Unknown argument: $1"
       ;;
   esac
 done
 
-need_cmd() {
-  if ! command -v "$1" >/dev/null 2>&1; then
-    echo "Missing required command: $1" >&2
-    exit 1
-  fi
-}
+[[ -d "${CHART_DIR}" ]] || dev_die "Chart directory not found: ${CHART_DIR}"
+CHART_DIR="$(cd -- "${CHART_DIR}" && pwd -P)"
+VALUES_FILE="$(cd -- "$(dirname -- "${VALUES_FILE}")" 2>/dev/null && pwd -P)/$(basename "${VALUES_FILE}")"
+[[ -f "${VALUES_FILE}" ]] || dev_die "Values file not found: ${VALUES_FILE}"
+
+dev_need_cmd docker
+dev_need_cmd helm
+dev_need_cmd kubectl
+dev_need_cmd k3d
+dev_need_cmd jq
 
 run() {
   echo "+ $*"
@@ -122,52 +118,25 @@ resolve_k3d_cluster() {
   local context inferred
 
   if [[ -n "${K3D_CLUSTER}" ]]; then
-    return
+    return 0
   fi
 
   context="$(kubectl config current-context 2>/dev/null || true)"
   if [[ "${context}" == k3d-* ]]; then
     K3D_CLUSTER="${context#k3d-}"
-    return
+    return 0
   fi
 
-  inferred="$(
-    k3d cluster list -o json 2>/dev/null | python3 -c '
-import json
-import sys
-
-try:
-    clusters = json.load(sys.stdin)
-except Exception:
-    print("")
-    raise SystemExit(0)
-
-names = [item.get("name", "").strip() for item in clusters if isinstance(item, dict)]
-names = [name for name in names if name]
-
-print(names[0] if len(names) == 1 else "")
-'
-  )"
-
-  if [[ -n "${inferred}" ]]; then
-    K3D_CLUSTER="${inferred}"
-    return
-  fi
-
-  echo "Unable to infer k3d cluster. Please provide --cluster <name>." >&2
-  exit 1
+  inferred="$(k3d cluster list -o json 2>/dev/null | jq -r 'if length == 1 then .[0].name else "" end')"
+  [[ -n "${inferred}" ]] || dev_die "Unable to infer k3d cluster. Please provide --cluster <name>."
+  K3D_CLUSTER="${inferred}"
 }
 
 verify_context_matches_cluster() {
   local current expected
   current="$(kubectl config current-context 2>/dev/null || true)"
   expected="k3d-${K3D_CLUSTER}"
-
-  if [[ "${current}" != "${expected}" ]]; then
-    echo "kubectl context mismatch: current='${current}', expected='${expected}'." >&2
-    echo "Please run: kubectl config use-context ${expected}" >&2
-    exit 1
-  fi
+  [[ "${current}" == "${expected}" ]] || dev_die "kubectl context mismatch: current='${current}', expected='${expected}'. Run: kubectl config use-context ${expected}"
 }
 
 declare -A FALLBACK_IMAGE_REPO=(
@@ -177,59 +146,37 @@ declare -A FALLBACK_IMAGE_REPO=(
   ["aigateway/promtail"]="grafana/promtail"
 )
 
+resolve_value() {
+  local path="$1"
+  yaml_get_scalar "${VALUES_FILE}" "${path}"
+}
+
+append_image() {
+  local repository="$1"
+  local tag="$2"
+  [[ -n "${repository}" && -n "${tag}" ]] || return 0
+  printf '%s:%s\n' "${repository}" "${tag}"
+}
+
 resolve_images() {
-  python3 - "${VALUES_FILE}" <<'PY'
-import sys
-import yaml
-
-path = sys.argv[1]
-with open(path, "r", encoding="utf-8") as f:
-    values = yaml.safe_load(f) or {}
-
-
-def get(data, *keys, default=None):
-    cur = data
-    for key in keys:
-        if not isinstance(cur, dict) or key not in cur:
-            return default
-        cur = cur[key]
-    return cur
-
-
-def add(images, repository, tag):
-    if repository and tag:
-        images.add(f"{repository}:{tag}")
-
-
-images = set()
-
-add(images, get(values, "higress-core", "gateway", "repository"), get(values, "higress-core", "gateway", "tag"))
-add(images, get(values, "higress-core", "controller", "repository"), get(values, "higress-core", "controller", "tag"))
-add(images, get(values, "higress-core", "pilot", "repository"), get(values, "higress-core", "pilot", "tag"))
-add(images, get(values, "higress-core", "pluginServer", "repository"), get(values, "higress-core", "pluginServer", "tag"))
-add(images, get(values, "higress-core", "redis", "redis", "repository"), get(values, "higress-core", "redis", "redis", "tag"))
-
-add(images, get(values, "aigateway-console", "image", "repository"), get(values, "aigateway-console", "image", "tag"))
-
-add(images, get(values, "global", "o11y", "grafana", "image", "repository"), get(values, "global", "o11y", "grafana", "image", "tag"))
-add(images, get(values, "global", "o11y", "prometheus", "image", "repository"), get(values, "global", "o11y", "prometheus", "image", "tag"))
-add(images, get(values, "global", "o11y", "loki", "image", "repository"), get(values, "global", "o11y", "loki", "image", "tag"))
-add(images, get(values, "global", "o11y", "promtail", "image", "repository"), get(values, "global", "o11y", "promtail", "image", "tag"))
-
-portal_repository = get(values, "aigateway-portal", "backend", "image", "repository")
-portal_tag = get(values, "aigateway-portal", "backend", "image", "tag")
-if not portal_repository:
-    portal_repository = get(values, "aigateway-portal", "image", "repository")
-if not portal_tag:
-    portal_tag = get(values, "aigateway-portal", "image", "tag")
-add(images, portal_repository, portal_tag)
-add(images,
-    get(values, "aigateway-portal", "mysql", "image", "repository", default="mariadb"),
-    get(values, "aigateway-portal", "mysql", "image", "tag", default="11.4"))
-
-for image in sorted(images):
-    print(image)
-PY
+  {
+    append_image "$(resolve_value "higress-core.gateway.repository")" "$(resolve_value "higress-core.gateway.tag")"
+    append_image "$(resolve_value "higress-core.controller.repository")" "$(resolve_value "higress-core.controller.tag")"
+    append_image "$(resolve_value "higress-core.pilot.repository")" "$(resolve_value "higress-core.pilot.tag")"
+    append_image "$(resolve_value "higress-core.pluginServer.repository")" "$(resolve_value "higress-core.pluginServer.tag")"
+    append_image "$(resolve_value "higress-core.redis.redis.repository")" "$(resolve_value "higress-core.redis.redis.tag")"
+    append_image "$(resolve_value "aigateway-console.image.repository")" "$(resolve_value "aigateway-console.image.tag")"
+    append_image "$(resolve_value "global.o11y.grafana.image.repository")" "$(resolve_value "global.o11y.grafana.image.tag")"
+    append_image "$(resolve_value "global.o11y.prometheus.image.repository")" "$(resolve_value "global.o11y.prometheus.image.tag")"
+    append_image "$(resolve_value "global.o11y.loki.image.repository")" "$(resolve_value "global.o11y.loki.image.tag")"
+    append_image "$(resolve_value "global.o11y.promtail.image.repository")" "$(resolve_value "global.o11y.promtail.image.tag")"
+    append_image \
+      "$(yaml_get_scalar_from_files "aigateway-portal.backend.image.repository" "${VALUES_FILE}")$( [[ -z "$(resolve_value "aigateway-portal.backend.image.repository")" ]] && printf '%s' "$(resolve_value "aigateway-portal.image.repository")" )" \
+      "$(yaml_get_scalar_from_files "aigateway-portal.backend.image.tag" "${VALUES_FILE}")$( [[ -z "$(resolve_value "aigateway-portal.backend.image.tag")" ]] && printf '%s' "$(resolve_value "aigateway-portal.image.tag")" )"
+    append_image \
+      "$(resolve_value "aigateway-portal.mysql.image.repository")$( [[ -z "$(resolve_value "aigateway-portal.mysql.image.repository")" ]] && printf 'mariadb' )" \
+      "$(resolve_value "aigateway-portal.mysql.image.tag")$( [[ -z "$(resolve_value "aigateway-portal.mysql.image.tag")" ]] && printf '11.4' )"
+  } | awk 'NF { images[$0] = 1 } END { for (image in images) print image }' | sort
 }
 
 ensure_local_image() {
@@ -243,11 +190,7 @@ ensure_local_image() {
   repository="${image%:*}"
   tag="${image##*:}"
   fallback_repo="${FALLBACK_IMAGE_REPO[${repository}]:-}"
-
-  if [[ -z "${fallback_repo}" ]]; then
-    echo "Local image not found and no fallback mapping configured: ${image}" >&2
-    return 1
-  fi
+  [[ -n "${fallback_repo}" ]] || dev_die "Local image not found and no fallback mapping configured: ${image}"
 
   fallback_image="${fallback_repo}:${tag}"
   if ! docker image inspect "${fallback_image}" >/dev/null 2>&1; then
@@ -255,22 +198,6 @@ ensure_local_image() {
   fi
   run docker tag "${fallback_image}" "${image}"
 }
-
-need_cmd docker
-need_cmd helm
-need_cmd kubectl
-need_cmd k3d
-need_cmd python3
-
-if [[ ! -f "${VALUES_FILE}" ]]; then
-  echo "Values file not found: ${VALUES_FILE}" >&2
-  exit 1
-fi
-
-if [[ ! -d "${CHART_DIR}" ]]; then
-  echo "Chart directory not found: ${CHART_DIR}" >&2
-  exit 1
-fi
 
 resolve_k3d_cluster
 verify_context_matches_cluster
@@ -285,10 +212,7 @@ fi
 
 if [[ "${SKIP_LOAD}" != "true" ]]; then
   mapfile -t IMAGES < <(resolve_images)
-  if [[ ${#IMAGES[@]} -eq 0 ]]; then
-    echo "No images resolved from ${VALUES_FILE}" >&2
-    exit 1
-  fi
+  [[ ${#IMAGES[@]} -gt 0 ]] || dev_die "No images resolved from ${VALUES_FILE}"
 
   echo "Importing images into k3d (${#IMAGES[@]} images)..."
   for image in "${IMAGES[@]}"; do
@@ -298,7 +222,7 @@ if [[ "${SKIP_LOAD}" != "true" ]]; then
 fi
 
 if [[ "${SKIP_DEPLOY}" != "true" ]]; then
-  run helm dependency update "${CHART_DIR}"
+  run helm dependency build "${CHART_DIR}"
   run helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" \
     -n "${NAMESPACE}" \
     --create-namespace \
