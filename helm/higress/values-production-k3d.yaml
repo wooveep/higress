@@ -77,7 +77,7 @@ aigateway-console:
     port: 8080
   image:
     repository: aigateway/console
-    tag: "2.2.0-dev-20260421132337"
+    tag: "2.2.0-dev-20260422064512"
     pullPolicy: IfNotPresent
   pluginServer:
     serviceName: aigateway-plugin-server
