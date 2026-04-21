@@ -10,10 +10,15 @@ name: higress-core
 sources:
   - http://github.com/alibaba/higress
 dependencies:
-  - condition: global.enableRedis
+  - condition: redis.enabled
     name: redis
-    repository: "file://../redis"
-    version: 0.0.1
+    repository: "file://charts/redis-ha"
+    version: 25.3.11
+  - alias: postgresql
+    condition: postgresql.enabled
+    name: postgresql-ha
+    repository: "file://charts/postgresql-ha"
+    version: 16.3.2
   - condition: mysql.mysql.enabled
     name: mysql
     repository: "file://charts/mysql"

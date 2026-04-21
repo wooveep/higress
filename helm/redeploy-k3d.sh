@@ -144,11 +144,25 @@ declare -A FALLBACK_IMAGE_REPO=(
   ["aigateway/prometheus"]="prom/prometheus"
   ["aigateway/loki"]="grafana/loki"
   ["aigateway/promtail"]="grafana/promtail"
+  ["bitnamilegacy/redis"]="bitnamilegacy/redis"
+  ["bitnamilegacy/redis-sentinel"]="bitnamilegacy/redis-sentinel"
+  ["bitnamilegacy/postgresql-repmgr"]="bitnamilegacy/postgresql-repmgr"
+  ["bitnamilegacy/pgpool"]="bitnamilegacy/pgpool"
+  ["bitnami/redis"]="bitnami/redis"
+  ["bitnami/redis-sentinel"]="bitnami/redis-sentinel"
+  ["bitnami/postgresql-repmgr"]="bitnami/postgresql-repmgr"
+  ["bitnami/pgpool"]="bitnami/pgpool"
 )
 
 resolve_value() {
   local path="$1"
   yaml_get_scalar "${VALUES_FILE}" "${path}"
+}
+
+value_is_true() {
+  local value
+  value="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  [[ "${value}" == "true" || "${value}" == "yes" || "${value}" == "on" || "${value}" == "1" ]]
 }
 
 append_image() {
@@ -164,7 +178,24 @@ resolve_images() {
     append_image "$(resolve_value "higress-core.controller.repository")" "$(resolve_value "higress-core.controller.tag")"
     append_image "$(resolve_value "higress-core.pilot.repository")" "$(resolve_value "higress-core.pilot.tag")"
     append_image "$(resolve_value "higress-core.pluginServer.repository")" "$(resolve_value "higress-core.pluginServer.tag")"
-    append_image "$(resolve_value "higress-core.redis.redis.repository")" "$(resolve_value "higress-core.redis.redis.tag")"
+    if value_is_true "$(resolve_value "higress-core.redis.enabled")"; then
+      append_image \
+        "$(resolve_value "higress-core.redis.image.repository")$( [[ -z "$(resolve_value "higress-core.redis.image.repository")" ]] && printf '%s' "$(resolve_value "higress-core.redis.redis.repository")" )" \
+        "$(resolve_value "higress-core.redis.image.tag")$( [[ -z "$(resolve_value "higress-core.redis.image.tag")" ]] && printf '%s' "$(resolve_value "higress-core.redis.redis.tag")" )"
+      if value_is_true "$(resolve_value "higress-core.redis.sentinel.enabled")"; then
+        append_image \
+          "$(resolve_value "higress-core.redis.sentinel.image.repository")" \
+          "$(resolve_value "higress-core.redis.sentinel.image.tag")"
+      fi
+    fi
+    if value_is_true "$(resolve_value "higress-core.postgresql.enabled")"; then
+      append_image \
+        "$(resolve_value "higress-core.postgresql.postgresql.image.repository")" \
+        "$(resolve_value "higress-core.postgresql.postgresql.image.tag")"
+      append_image \
+        "$(resolve_value "higress-core.postgresql.pgpool.image.repository")" \
+        "$(resolve_value "higress-core.postgresql.pgpool.image.tag")"
+    fi
     append_image "$(resolve_value "aigateway-console.image.repository")" "$(resolve_value "aigateway-console.image.tag")"
     append_image "$(resolve_value "global.o11y.grafana.image.repository")" "$(resolve_value "global.o11y.grafana.image.tag")"
     append_image "$(resolve_value "global.o11y.prometheus.image.repository")" "$(resolve_value "global.o11y.prometheus.image.tag")"
@@ -173,9 +204,11 @@ resolve_images() {
     append_image \
       "$(yaml_get_scalar_from_files "aigateway-portal.backend.image.repository" "${VALUES_FILE}")$( [[ -z "$(resolve_value "aigateway-portal.backend.image.repository")" ]] && printf '%s' "$(resolve_value "aigateway-portal.image.repository")" )" \
       "$(yaml_get_scalar_from_files "aigateway-portal.backend.image.tag" "${VALUES_FILE}")$( [[ -z "$(resolve_value "aigateway-portal.backend.image.tag")" ]] && printf '%s' "$(resolve_value "aigateway-portal.image.tag")" )"
-    append_image \
-      "$(resolve_value "aigateway-portal.mysql.image.repository")$( [[ -z "$(resolve_value "aigateway-portal.mysql.image.repository")" ]] && printf 'mariadb' )" \
-      "$(resolve_value "aigateway-portal.mysql.image.tag")$( [[ -z "$(resolve_value "aigateway-portal.mysql.image.tag")" ]] && printf '11.4' )"
+    if value_is_true "$(resolve_value "aigateway-portal.mysql.enabled")"; then
+      append_image \
+        "$(resolve_value "aigateway-portal.mysql.image.repository")$( [[ -z "$(resolve_value "aigateway-portal.mysql.image.repository")" ]] && printf 'mariadb' )" \
+        "$(resolve_value "aigateway-portal.mysql.image.tag")$( [[ -z "$(resolve_value "aigateway-portal.mysql.image.tag")" ]] && printf '11.4' )"
+    fi
   } | awk 'NF { images[$0] = 1 } END { for (image in images) print image }' | sort
 }
 

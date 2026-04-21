@@ -31,22 +31,22 @@ type detailedUsageMetrics struct {
 }
 
 type rateLimitModelPrice struct {
-	ModelID                                        string
-	PriceVersion                                   int64
-	InputPer1K                                     int64
-	OutputPer1K                                    int64
-	InputRequestPriceMicroYuan                     int64
-	CacheCreationInputTokenPricePer1KMicroYuan     int64
-	CacheCreationInputTokenPriceAbove1hrPer1KMicroYuan int64
-	CacheReadInputTokenPricePer1KMicroYuan         int64
-	InputTokenPriceAbove200kPer1KMicroYuan         int64
-	OutputTokenPriceAbove200kPer1KMicroYuan        int64
-	CacheCreationInputTokenPriceAbove200kPer1KMicroYuan int64
-	CacheReadInputTokenPriceAbove200kPer1KMicroYuan int64
-	OutputImagePriceMicroYuan                      int64
-	OutputImageTokenPricePer1KMicroYuan            int64
-	InputImagePriceMicroYuan                       int64
-	InputImageTokenPricePer1KMicroYuan             int64
+	ModelID                                                string
+	PriceVersion                                           int64
+	InputMicroYuanPerToken                                 int64
+	OutputMicroYuanPerToken                                int64
+	InputRequestPriceMicroYuan                             int64
+	CacheCreationInputTokenPriceMicroYuanPerToken          int64
+	CacheCreationInputTokenPriceAbove1hrMicroYuanPerToken  int64
+	CacheReadInputTokenPriceMicroYuanPerToken              int64
+	InputTokenPriceAbove200kMicroYuanPerToken              int64
+	OutputTokenPriceAbove200kMicroYuanPerToken             int64
+	CacheCreationInputTokenPriceAbove200kMicroYuanPerToken int64
+	CacheReadInputTokenPriceAbove200kMicroYuanPerToken     int64
+	OutputImagePriceMicroYuan                              int64
+	OutputImageTokenPriceMicroYuanPerToken                 int64
+	InputImagePriceMicroYuan                               int64
+	InputImageTokenPriceMicroYuanPerToken                  int64
 }
 
 func mergeDetailedUsageFromResponse(ctx wrapper.HttpContext, data []byte) detailedUsageMetrics {
@@ -357,11 +357,11 @@ func parseModelPriceResponse(modelName string, response resp.Value) (rateLimitMo
 	for i := 0; i+1 < len(fields); i += 2 {
 		kv[fields[i].String()] = fields[i+1].String()
 	}
-	inputPer1K, err := strconv.ParseInt(strings.TrimSpace(kv["input_price_per_1k_micro_yuan"]), 10, 64)
+	inputPerToken, err := parseTokenPriceMicroYuanPerToken(kv, "input_price_micro_yuan_per_token", "input_price_per_1k_micro_yuan")
 	if err != nil {
 		return rateLimitModelPrice{}, false
 	}
-	outputPer1K, err := strconv.ParseInt(strings.TrimSpace(kv["output_price_per_1k_micro_yuan"]), 10, 64)
+	outputPerToken, err := parseTokenPriceMicroYuanPerToken(kv, "output_price_micro_yuan_per_token", "output_price_per_1k_micro_yuan")
 	if err != nil {
 		return rateLimitModelPrice{}, false
 	}
@@ -371,22 +371,22 @@ func parseModelPriceResponse(modelName string, response resp.Value) (rateLimitMo
 		modelID = modelName
 	}
 	return rateLimitModelPrice{
-		ModelID:                                        modelID,
-		PriceVersion:                                   priceVersion,
-		InputPer1K:                                     inputPer1K,
-		OutputPer1K:                                    outputPer1K,
-		InputRequestPriceMicroYuan:                     parseInt64String(kv["input_request_price_micro_yuan"]),
-		CacheCreationInputTokenPricePer1KMicroYuan:     parseInt64String(kv["cache_creation_input_token_price_per_1k_micro_yuan"]),
-		CacheCreationInputTokenPriceAbove1hrPer1KMicroYuan: parseInt64String(kv["cache_creation_input_token_price_above_1hr_per_1k_micro_yuan"]),
-		CacheReadInputTokenPricePer1KMicroYuan:         parseInt64String(kv["cache_read_input_token_price_per_1k_micro_yuan"]),
-		InputTokenPriceAbove200kPer1KMicroYuan:         parseInt64String(kv["input_token_price_above_200k_per_1k_micro_yuan"]),
-		OutputTokenPriceAbove200kPer1KMicroYuan:        parseInt64String(kv["output_token_price_above_200k_per_1k_micro_yuan"]),
-		CacheCreationInputTokenPriceAbove200kPer1KMicroYuan: parseInt64String(kv["cache_creation_input_token_price_above_200k_per_1k_micro_yuan"]),
-		CacheReadInputTokenPriceAbove200kPer1KMicroYuan: parseInt64String(kv["cache_read_input_token_price_above_200k_per_1k_micro_yuan"]),
-		OutputImagePriceMicroYuan:                      parseInt64String(kv["output_image_price_micro_yuan"]),
-		OutputImageTokenPricePer1KMicroYuan:            parseInt64String(kv["output_image_token_price_per_1k_micro_yuan"]),
-		InputImagePriceMicroYuan:                       parseInt64String(kv["input_image_price_micro_yuan"]),
-		InputImageTokenPricePer1KMicroYuan:             parseInt64String(kv["input_image_token_price_per_1k_micro_yuan"]),
+		ModelID:                    modelID,
+		PriceVersion:               priceVersion,
+		InputMicroYuanPerToken:     inputPerToken,
+		OutputMicroYuanPerToken:    outputPerToken,
+		InputRequestPriceMicroYuan: parseInt64String(kv["input_request_price_micro_yuan"]),
+		CacheCreationInputTokenPriceMicroYuanPerToken:          parseTokenPriceWithFallback(kv, "cache_creation_input_token_price_micro_yuan_per_token", "cache_creation_input_token_price_per_1k_micro_yuan"),
+		CacheCreationInputTokenPriceAbove1hrMicroYuanPerToken:  parseTokenPriceWithFallback(kv, "cache_creation_input_token_price_above_1hr_micro_yuan_per_token", "cache_creation_input_token_price_above_1hr_per_1k_micro_yuan"),
+		CacheReadInputTokenPriceMicroYuanPerToken:              parseTokenPriceWithFallback(kv, "cache_read_input_token_price_micro_yuan_per_token", "cache_read_input_token_price_per_1k_micro_yuan"),
+		InputTokenPriceAbove200kMicroYuanPerToken:              parseTokenPriceWithFallback(kv, "input_token_price_above_200k_micro_yuan_per_token", "input_token_price_above_200k_per_1k_micro_yuan"),
+		OutputTokenPriceAbove200kMicroYuanPerToken:             parseTokenPriceWithFallback(kv, "output_token_price_above_200k_micro_yuan_per_token", "output_token_price_above_200k_per_1k_micro_yuan"),
+		CacheCreationInputTokenPriceAbove200kMicroYuanPerToken: parseTokenPriceWithFallback(kv, "cache_creation_input_token_price_above_200k_micro_yuan_per_token", "cache_creation_input_token_price_above_200k_per_1k_micro_yuan"),
+		CacheReadInputTokenPriceAbove200kMicroYuanPerToken:     parseTokenPriceWithFallback(kv, "cache_read_input_token_price_above_200k_micro_yuan_per_token", "cache_read_input_token_price_above_200k_per_1k_micro_yuan"),
+		OutputImagePriceMicroYuan:                              parseInt64String(kv["output_image_price_micro_yuan"]),
+		OutputImageTokenPriceMicroYuanPerToken:                 parseTokenPriceWithFallback(kv, "output_image_token_price_micro_yuan_per_token", "output_image_token_price_per_1k_micro_yuan"),
+		InputImagePriceMicroYuan:                               parseInt64String(kv["input_image_price_micro_yuan"]),
+		InputImageTokenPriceMicroYuanPerToken:                  parseTokenPriceWithFallback(kv, "input_image_token_price_micro_yuan_per_token", "input_image_token_price_per_1k_micro_yuan"),
 	}, true
 }
 
@@ -394,34 +394,33 @@ func calculateAmountCost(metrics detailedUsageMetrics, price rateLimitModelPrice
 	inputContextTokens := metrics.InputTokens + maxInt64(metrics.CacheCreationInputTokens,
 		metrics.CacheCreation5mInputTokens+metrics.CacheCreation1hInputTokens) + metrics.CacheReadInputTokens + metrics.InputImageTokens
 	useAbove200k := inputContextTokens > 200_000
-	inputPer1K := choosePrice(useAbove200k, price.InputTokenPriceAbove200kPer1KMicroYuan, price.InputPer1K)
-	outputPer1K := choosePrice(useAbove200k, price.OutputTokenPriceAbove200kPer1KMicroYuan, price.OutputPer1K)
-	cacheCreationPer1K := choosePrice(useAbove200k, price.CacheCreationInputTokenPriceAbove200kPer1KMicroYuan,
-		price.CacheCreationInputTokenPricePer1KMicroYuan)
-	cacheReadPer1K := choosePrice(useAbove200k, price.CacheReadInputTokenPriceAbove200kPer1KMicroYuan,
-		price.CacheReadInputTokenPricePer1KMicroYuan)
-	cacheCreation1hPer1K := choosePrice(false, 0, price.CacheCreationInputTokenPriceAbove1hrPer1KMicroYuan)
-	if cacheCreation1hPer1K == 0 {
-		cacheCreation1hPer1K = cacheCreationPer1K
+	inputPerToken := choosePrice(useAbove200k, price.InputTokenPriceAbove200kMicroYuanPerToken, price.InputMicroYuanPerToken)
+	outputPerToken := choosePrice(useAbove200k, price.OutputTokenPriceAbove200kMicroYuanPerToken, price.OutputMicroYuanPerToken)
+	cacheCreationPerToken := choosePrice(useAbove200k, price.CacheCreationInputTokenPriceAbove200kMicroYuanPerToken,
+		price.CacheCreationInputTokenPriceMicroYuanPerToken)
+	cacheReadPerToken := choosePrice(useAbove200k, price.CacheReadInputTokenPriceAbove200kMicroYuanPerToken,
+		price.CacheReadInputTokenPriceMicroYuanPerToken)
+	cacheCreation1hPerToken := choosePrice(false, 0, price.CacheCreationInputTokenPriceAbove1hrMicroYuanPerToken)
+	if cacheCreation1hPerToken == 0 {
+		cacheCreation1hPerToken = cacheCreationPerToken
 	}
-	return roundTokenCost(metrics.InputTokens, inputPer1K) +
-		roundTokenCost(metrics.OutputTokens, outputPer1K) +
-		roundTokenCost(metrics.CacheCreation5mInputTokens, cacheCreationPer1K) +
-		roundTokenCost(metrics.CacheCreation1hInputTokens, cacheCreation1hPer1K) +
-		roundTokenCost(metrics.CacheReadInputTokens, cacheReadPer1K) +
-		roundTokenCost(metrics.InputImageTokens, price.InputImageTokenPricePer1KMicroYuan) +
-		roundTokenCost(metrics.OutputImageTokens, price.OutputImageTokenPricePer1KMicroYuan) +
+	return roundTokenCost(metrics.InputTokens, inputPerToken) +
+		roundTokenCost(metrics.OutputTokens, outputPerToken) +
+		roundTokenCost(metrics.CacheCreation5mInputTokens, cacheCreationPerToken) +
+		roundTokenCost(metrics.CacheCreation1hInputTokens, cacheCreation1hPerToken) +
+		roundTokenCost(metrics.CacheReadInputTokens, cacheReadPerToken) +
+		roundTokenCost(metrics.InputImageTokens, price.InputImageTokenPriceMicroYuanPerToken) +
+		roundTokenCost(metrics.OutputImageTokens, price.OutputImageTokenPriceMicroYuanPerToken) +
 		price.InputRequestPriceMicroYuan*maxInt64(metrics.RequestCount, 1) +
 		price.InputImagePriceMicroYuan*metrics.InputImageCount +
 		price.OutputImagePriceMicroYuan*metrics.OutputImageCount
 }
 
-func roundTokenCost(tokens int64, microPer1K int64) int64 {
-	if tokens <= 0 || microPer1K <= 0 {
+func roundTokenCost(tokens int64, microPerToken int64) int64 {
+	if tokens <= 0 || microPerToken <= 0 {
 		return 0
 	}
-	numerator := tokens * microPer1K
-	return (numerator + 500) / 1000
+	return tokens * microPerToken
 }
 
 func parseInt64String(value string) int64 {
@@ -430,6 +429,37 @@ func parseInt64String(value string) int64 {
 		return 0
 	}
 	return parsed
+}
+
+func parseNonNegativeInt64String(value string) (int64, error) {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return 0, strconv.ErrSyntax
+	}
+	parsed, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	if parsed < 0 {
+		return 0, strconv.ErrSyntax
+	}
+	return parsed, nil
+}
+
+func parseTokenPriceMicroYuanPerToken(kv map[string]string, modernKey string, legacyKey string) (int64, error) {
+	if value, err := parseNonNegativeInt64String(kv[modernKey]); err == nil {
+		return value, nil
+	}
+	legacy, err := parseNonNegativeInt64String(kv[legacyKey])
+	if err != nil {
+		return 0, err
+	}
+	return (legacy + 500) / 1000, nil
+}
+
+func parseTokenPriceWithFallback(kv map[string]string, modernKey string, legacyKey string) int64 {
+	value, _ := parseTokenPriceMicroYuanPerToken(kv, modernKey, legacyKey)
+	return value
 }
 
 func choosePrice(usePrimary bool, primary int64, fallback int64) int64 {

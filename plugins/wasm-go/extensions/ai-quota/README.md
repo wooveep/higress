@@ -71,7 +71,7 @@ redis:
 - 请求开始时读取 `x-mse-consumer`、请求模型和用户余额。
 - 若模型没有有效价格或余额小于等于 0，会直接拒绝，并写入审计事件。
 - 请求成功结束后会按真实 token 用量计算 `micro_yuan` 扣减金额，并写入 Redis Stream。
-- 后端 billing consumer 再从 Stream 中落库到 MySQL 账本。
+- 后端 billing consumer 再从 Stream 中落库到 PostgreSQL 账本。
 - 日/周/月金额窗口的 TTL 统一按 `UTC` 自然日历推导，而不是按部署机器本地时区。
 
 ### 金额模式计费口径

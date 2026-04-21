@@ -21,6 +21,7 @@ global:
       pvc:
         enabled: false
     promtail:
+      enabled: false
       image:
         repository: aigateway/promtail
         tag: 2.9.4
@@ -30,10 +31,32 @@ higress-core:
   enabled: true
   mysql:
     mysql:
-      enabled: true
-      name: mysql-server
-      repository: aigateway/mariadb
-      tag: "11.4"
+      enabled: false
+  postgresql:
+    enabled: true
+    fullnameOverride: aigateway-core-postgresql
+    postgresql:
+      username: portal
+      password: portal
+      database: aigateway_portal
+      postgresPassword: postgres
+      repmgrPassword: repmgr
+      image:
+        registry: docker.io
+        repository: bitnamilegacy/postgresql-repmgr
+        tag: 17.6.0-debian-12-r2
+      replicaCount: 1
+      persistence:
+        enabled: true
+        size: 2Gi
+    pgpool:
+      replicaCount: 1
+      adminPassword: admin
+      srCheckPassword: srcheck
+      image:
+        registry: docker.io
+        repository: bitnamilegacy/pgpool
+        tag: 4.6.3-debian-12-r0
   mcpServer:
     enable: true
     sse_path_suffix: /sse
@@ -44,7 +67,7 @@ higress-core:
   gateway:
     name: aigateway-gateway
     repository: aigateway/gateway
-    tag: "2.2.0-dev-20260327030541"
+    tag: "2.2.0-dev-20260419132939"
     service:
       type: LoadBalancer
     hostPort:
@@ -52,20 +75,52 @@ higress-core:
   controller:
     name: aigateway-controller
     repository: aigateway/controller
-    tag: "2.2.0-dev-20260327030541"
+    tag: "2.2.0-dev-20260419132939"
   pilot:
     repository: aigateway/pilot
-    tag: "2.2.0-dev-20260327030541"
+    tag: "2.2.0-dev-20260419132939"
   pluginServer:
     name: aigateway-plugin-server
     replicas: 1
     repository: aigateway/plugin-server
-    tag: "1.0.0-dev-20260327030541"
+    tag: "1.0.0-dev-20260419132939"
   redis:
-    redis:
-      name: redis-stack-server
-      repository: aigateway/redis-stack-server
-      tag: "7.4.0"
+    enabled: true
+    fullnameOverride: redis-server
+    architecture: replication
+    auth:
+      enabled: true
+      sentinel: true
+      password: aigateway-redis
+    image:
+      registry: docker.io
+      repository: bitnamilegacy/redis
+      tag: 8.0.3-debian-12-r3
+    sentinel:
+      enabled: true
+      image:
+        registry: docker.io
+        repository: bitnamilegacy/redis-sentinel
+        tag: 8.0.3-debian-12-r2
+      masterService:
+        enabled: true
+        ports:
+          redis: 6379
+    rbac:
+      create: true
+    serviceAccount:
+      create: true
+      automountServiceAccountToken: true
+    master:
+      persistence:
+        enabled: true
+        size: 1Gi
+    replica:
+      replicaCount: 1
+      automountServiceAccountToken: true
+      persistence:
+        enabled: true
+        size: 1Gi
 
 aigateway-console:
   enabled: true
@@ -81,25 +136,39 @@ aigateway-console:
     port: 8080
   image:
     repository: aigateway/console
-    tag: "2.2.0-dev-20260416215530"
+    tag: "2.2.0-dev-20260421132337"
     pullPolicy: IfNotPresent
   portalDatabase:
     enabled: true
-    host: mysql-server
+    driver: postgres
+    host: aigateway-core-postgresql-pgpool
+    port: 5432
+    database: aigateway_portal
+    params: "sslmode=disable"
+    secretName: aigateway-core-db
+    usernameKey: username
+    passwordKey: password
 
 aigateway-portal:
   enabled: true
   name: aigateway-portal
   mysql:
     enabled: false
+  database:
+    driver: postgres
+    createSecret: false
+    existingSecret: aigateway-core-db
+    host: aigateway-core-postgresql-pgpool
+    port: 5432
+    name: aigateway_portal
+    username: portal
+    password: portal
+    params: "sslmode=disable"
   backend:
     corePrometheusURL: "http://aigateway-console-prometheus:9090/prometheus"
-  database:
-    createSecret: false
-    host: mysql-server
   image:
     repository: aigateway/portal
-    tag: "0.2.0-dev-20260416215530"
+    tag: "0.2.0-dev-20260421141000"
     pullPolicy: IfNotPresent
   service:
     type: LoadBalancer

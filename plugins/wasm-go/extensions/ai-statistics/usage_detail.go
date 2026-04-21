@@ -281,6 +281,18 @@ func normalizeCacheTTL(value string) string {
 }
 
 func countJSONOutputImages(data []byte) int64 {
+	rootResult := gjson.ParseBytes(data)
+	if dataArray := rootResult.Get("data"); dataArray.Exists() && dataArray.IsArray() {
+		var total int64
+		for _, item := range dataArray.Array() {
+			if item.Get("url").Exists() || item.Get("b64_json").Exists() {
+				total++
+			}
+		}
+		if total > 0 {
+			return total
+		}
+	}
 	var root any
 	if err := json.Unmarshal(data, &root); err != nil {
 		return 0

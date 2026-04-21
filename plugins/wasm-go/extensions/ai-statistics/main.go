@@ -65,6 +65,7 @@ const (
 	// AI API Paths
 	PathOpenAIChatCompletions       = "/v1/chat/completions"
 	PathOpenAICompletions           = "/v1/completions"
+	PathOpenAIImageGenerations      = "/v1/images/generations"
 	PathOpenAIEmbeddings            = "/v1/embeddings"
 	PathOpenAIModels                = "/v1/models"
 	PathGeminiGenerateContent       = "/generateContent"
@@ -88,12 +89,12 @@ const (
 	ChatRound              = "chat_round"
 
 	// Inner span attributes
-	ArmsSpanKind     = "gen_ai.span.kind"
-	ArmsModelName    = "gen_ai.model_name"
-	ArmsRequestModel = "gen_ai.request.model"
-	ArmsInputToken   = "gen_ai.usage.input_tokens"
-	ArmsOutputToken  = "gen_ai.usage.output_tokens"
-	ArmsTotalToken   = "gen_ai.usage.total_tokens"
+	ArmsSpanKind                  = "gen_ai.span.kind"
+	ArmsModelName                 = "gen_ai.model_name"
+	ArmsRequestModel              = "gen_ai.request.model"
+	ArmsInputToken                = "gen_ai.usage.input_tokens"
+	ArmsOutputToken               = "gen_ai.usage.output_tokens"
+	ArmsTotalToken                = "gen_ai.usage.total_tokens"
 	ArmsCacheCreationInputToken   = "gen_ai.usage.cache_creation_input_tokens"
 	ArmsCacheCreation5mInputToken = "gen_ai.usage.cache_creation_5m_input_tokens"
 	ArmsCacheCreation1hInputToken = "gen_ai.usage.cache_creation_1h_input_tokens"
@@ -636,8 +637,8 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 
 	// If use_default_attributes or use_default_response_attributes is enabled and enable_path_suffixes is not configured, use default path suffixes
 	if (useDefaultAttributes || useDefaultResponseAttributes) && !configJson.Get("enable_path_suffixes").Exists() {
-		config.enablePathSuffixes = []string{"/completions", "/messages"}
-		log.Infof("Using default path suffixes: /completions, /messages")
+		config.enablePathSuffixes = []string{"/completions", "/messages", "/images/generations"}
+		log.Infof("Using default path suffixes: /completions, /messages, /images/generations")
 	} else {
 		// Process manually configured path suffixes
 		for _, suffix := range pathSuffixes {
@@ -1427,10 +1428,6 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 		return
 	}
 
-	if ctx.GetUserAttribute(tokenusage.CtxKeyModel) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyInputToken) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyOutputToken) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyTotalToken) == nil {
-		log.Info("get usage information failed, skip metric record")
-		return
-	}
 	model, ok = ctx.GetUserAttribute(tokenusage.CtxKeyModel).(string)
 	if !ok {
 		log.Info("Model type assert failed, skip metric record")
@@ -1439,17 +1436,17 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	if inputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyInputToken)); ok {
 		config.incrementCounter(generateMetricName(route, cluster, model, consumer, tokenusage.CtxKeyInputToken), inputToken)
 	} else {
-		log.Info("InputToken type assert failed, skip metric record")
+		log.Debug("InputToken missing, skip token counter")
 	}
 	if outputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyOutputToken)); ok {
 		config.incrementCounter(generateMetricName(route, cluster, model, consumer, tokenusage.CtxKeyOutputToken), outputToken)
 	} else {
-		log.Info("OutputToken type assert failed, skip metric record")
+		log.Debug("OutputToken missing, skip token counter")
 	}
 	if totalToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyTotalToken)); ok {
 		config.incrementCounter(generateMetricName(route, cluster, model, consumer, tokenusage.CtxKeyTotalToken), totalToken)
 	} else {
-		log.Info("TotalToken type assert failed, skip metric record")
+		log.Debug("TotalToken missing, skip token counter")
 	}
 	incrementOptionalMetric(ctx, config, route, cluster, model, consumer, "cache_creation_input_token")
 	incrementOptionalMetric(ctx, config, route, cluster, model, consumer, "cache_creation_5m_input_token")
