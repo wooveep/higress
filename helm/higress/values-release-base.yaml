@@ -81,7 +81,7 @@ higress-core:
         size: 1Gi
   gateway:
     repository: aigateway/gateway
-    tag: "2.2.0-dev-20260327030541"
+    tag: "1.0.0"
     service:
       type: LoadBalancer
     hostPort:
@@ -91,16 +91,16 @@ higress-core:
       minAvailable: 1
   controller:
     repository: aigateway/controller
-    tag: "2.2.0-dev-20260327030541"
+    tag: "1.0.0"
     pdb:
       enabled: false
       minAvailable: 1
   pilot:
     repository: aigateway/pilot
-    tag: "2.2.0-dev-20260327030541"
+    tag: "1.0.0"
   pluginServer:
     repository: aigateway/plugin-server
-    tag: "1.0.0-dev-20260327030541"
+    tag: "1.0.0"
     pdb:
       enabled: false
       minAvailable: 1
@@ -120,14 +120,14 @@ aigateway-console:
     port: 8080
   image:
     repository: aigateway/console
-    tag: "2.2.0-dev-20260416215530"
+    tag: "1.0.0"
     pullPolicy: IfNotPresent
   pluginServer:
     serviceName: aigateway-plugin-server
   certmanager:
     image:
       repository: aigateway
-      tag: dev-20260327030541
+      tag: "1.0.0"
   portalDatabase:
     enabled: true
     driver: postgres
@@ -169,7 +169,7 @@ aigateway-portal:
     rechargeFallbackAvgCostPer1K: 0.02
   image:
     repository: aigateway/portal
-    tag: "0.2.0-dev-20260416215530"
+    tag: "1.0.0"
     pullPolicy: IfNotPresent
   service:
     type: LoadBalancer

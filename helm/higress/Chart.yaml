@@ -1,5 +1,5 @@
 apiVersion: v2
-appVersion: 2.2.1
+appVersion: 1.0.0
 description: Helm chart for deploying AIGateway gateways
 icon: https://higress.io/img/higress_logo_small.png
 home: http://higress.io/
@@ -17,11 +17,11 @@ dependencies:
 - name: aigateway-console
   alias: aigateway-console
   repository: "file://../../../aigateway-console/helm"
-  version: 2.2.0
+  version: 1.0.0
   condition: aigateway-console.enabled
 - name: aigateway-portal
   repository: "file://../../../aigateway-portal/helm"
-  version: 0.2.0
+  version: 1.0.0
   condition: aigateway-portal.enabled
 type: application
-version: 2.2.1
+version: 1.0.0

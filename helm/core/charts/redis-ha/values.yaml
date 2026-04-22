@@ -118,7 +118,7 @@ diagnosticMode:
 ##
 image:
   registry: registry-1.docker.io
-  repository: bitnami/redis
+  repository: bitnamilegacy/redis
   tag: latest
   digest: ""
   ## Specify a imagePullPolicy
@@ -1207,7 +1207,7 @@ sentinel:
   ##
   image:
     registry: registry-1.docker.io
-    repository: bitnami/redis-sentinel
+    repository: bitnamilegacy/redis-sentinel
     tag: latest
     digest: ""
     ## Specify a imagePullPolicy
