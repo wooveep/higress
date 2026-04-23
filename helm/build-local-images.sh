@@ -5,7 +5,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 HIGRESS_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 ROOT_DIR="$(cd -- "${HIGRESS_DIR}/.." && pwd)"
-CONSOLE_DIR="${CONSOLE_DIR:-$(cd -- "${HIGRESS_DIR}/../higress-console" && pwd)}"
+source "${ROOT_DIR}/scripts/dev-shell-lib.sh"
+CONSOLE_DIR="${CONSOLE_DIR:-$(cd -- "${HIGRESS_DIR}/../aigateway-console" && pwd)}"
 PLUGIN_SERVER_DIR="${PLUGIN_SERVER_DIR:-$(cd -- "${HIGRESS_DIR}/../plugin-server" && pwd)}"
 PORTAL_DIR="${PORTAL_DIR:-${HIGRESS_DIR}/../aigateway-portal}"
 
@@ -22,10 +23,25 @@ WRAPPER_VALUES_FILE="${WRAPPER_VALUES_FILE:-${DEFAULT_WRAPPER_VALUES_FILE}}"
 CORE_VALUES_FILE="${CORE_VALUES_FILE:-${SCRIPT_DIR}/core/values-production-gray.yaml}"
 CONSOLE_VALUES_FILE="${CONSOLE_VALUES_FILE:-${CONSOLE_DIR}/helm/values-production-gray.yaml}"
 
-CONSOLE_PLUGIN_PROPERTIES_FILE="${CONSOLE_PLUGIN_PROPERTIES_FILE:-${CONSOLE_DIR}/backend/sdk/src/main/resources/plugins/plugins.properties}"
+DEFAULT_CONSOLE_PLUGIN_RESOURCE_DIR=""
+for candidate in \
+  "${CONSOLE_DIR}/backend/resource/public/plugin" \
+  "${CONSOLE_DIR}/backend-java-legacy/sdk/src/main/resources/plugins" \
+  "${CONSOLE_DIR}/backend/sdk/src/main/resources/plugins"
+do
+  if [[ -f "${candidate}/plugins.properties" ]]; then
+    DEFAULT_CONSOLE_PLUGIN_RESOURCE_DIR="${candidate}"
+    break
+  fi
+done
+if [[ -z "${DEFAULT_CONSOLE_PLUGIN_RESOURCE_DIR}" ]]; then
+  DEFAULT_CONSOLE_PLUGIN_RESOURCE_DIR="${CONSOLE_DIR}/backend/resource/public/plugin"
+fi
+
+CONSOLE_PLUGIN_RESOURCE_DIR="${CONSOLE_PLUGIN_RESOURCE_DIR:-${DEFAULT_CONSOLE_PLUGIN_RESOURCE_DIR}}"
+CONSOLE_PLUGIN_PROPERTIES_FILE="${CONSOLE_PLUGIN_PROPERTIES_FILE:-${CONSOLE_PLUGIN_RESOURCE_DIR}/plugins.properties}"
 PLUGIN_SERVER_PROPERTIES_FILE="${PLUGIN_SERVER_PROPERTIES_FILE:-${PLUGIN_SERVER_DIR}/plugins.properties}"
-CONSOLE_PLUGIN_RESOURCE_DIR="${CONSOLE_PLUGIN_RESOURCE_DIR:-${CONSOLE_DIR}/backend/sdk/src/main/resources/plugins}"
-SYNC_PLUGIN_VERSIONS_SCRIPT="${SYNC_PLUGIN_VERSIONS_SCRIPT:-${SCRIPT_DIR}/sync-plugin-versions.py}"
+SYNC_PLUGIN_VERSIONS_SCRIPT="${SYNC_PLUGIN_VERSIONS_SCRIPT:-${SCRIPT_DIR}/sync-plugin-versions.sh}"
 FORCE_SOURCE_VERSION_PLUGINS="${FORCE_SOURCE_VERSION_PLUGINS:-ai-quota}"
 
 LOCAL_PLUGIN_OUTPUT_DIR="${LOCAL_PLUGIN_OUTPUT_DIR:-${HIGRESS_DIR}/out/local-wasm-plugins}"
@@ -64,8 +80,8 @@ Examples:
 Environment overrides:
   WRAPPER_VALUES_FILE           Parent chart values file. Default: higress/helm/higress/values-production-gray.yaml
   CORE_VALUES_FILE              higress-core values file. Default: helm/core/values-production-gray.yaml
-  CONSOLE_VALUES_FILE           aigateway-console values file. Default: ../higress-console/helm/values-production-gray.yaml
-  CONSOLE_DIR                   Path to the aigateway-console repo. Default: ../higress-console
+  CONSOLE_VALUES_FILE           aigateway-console values file. Default: ../aigateway-console/helm/values-production-gray.yaml
+  CONSOLE_DIR                   Path to the aigateway-console repo. Default: ../aigateway-console
   PORTAL_DIR                    Path to the aigateway-portal repo. Default: ../aigateway-portal
   PLUGIN_SERVER_DIR             Path to the plugin-server repo. Default: ../plugin-server
   ARCH                          Target architecture. Default: amd64
@@ -120,22 +136,15 @@ need_cmd() {
 resolve_makefile_export() {
   local var_name="$1"
 
-  python3 - "${HIGRESS_DIR}/Makefile.core.mk" "${var_name}" <<'PY'
-import re
-import sys
-
-makefile_path, var_name = sys.argv[1:3]
-pattern = re.compile(rf'^\s*export\s+{re.escape(var_name)}\s*\??=\s*(.*?)\s*$')
-
-with open(makefile_path, "r", encoding="utf-8") as f:
-    for line in f:
-        match = pattern.match(line)
-        if match:
-            print(match.group(1))
-            sys.exit(0)
-
-sys.exit(1)
-PY
+  awk -v var_name="${var_name}" '
+    $0 ~ "^[[:space:]]*export[[:space:]]+" var_name "[[:space:]]*\\??=" {
+      sub(/^[[:space:]]*export[[:space:]]+/, "", $0)
+      sub(/[[:space:]]*\??=[[:space:]]*/, "\034", $0)
+      split($0, parts, "\034")
+      print parts[2]
+      exit 0
+    }
+  ' "${HIGRESS_DIR}/Makefile.core.mk"
 }
 
 run() {
@@ -227,40 +236,65 @@ has_component() {
   [[ "${padded}" == *",${wanted},"* ]]
 }
 
-for file in "${WRAPPER_VALUES_FILE}" "${CORE_VALUES_FILE}" "${CONSOLE_VALUES_FILE}" "${CONSOLE_PLUGIN_PROPERTIES_FILE}" "${PLUGIN_SERVER_PROPERTIES_FILE}"; do
+for file in "${WRAPPER_VALUES_FILE}" "${CORE_VALUES_FILE}" "${CONSOLE_VALUES_FILE}"; do
   if [[ ! -f "${file}" ]]; then
     echo "Required file not found: ${file}" >&2
     exit 1
   fi
 done
 
-if [[ ! -f "${SYNC_PLUGIN_VERSIONS_SCRIPT}" ]]; then
+if (has_component "plugins" || has_component "plugin-server") && [[ ! -f "${CONSOLE_PLUGIN_PROPERTIES_FILE}" ]]; then
+  echo "Required file not found: ${CONSOLE_PLUGIN_PROPERTIES_FILE}" >&2
+  exit 1
+fi
+
+if (has_component "plugins" || has_component "plugin-server") && [[ ! -f "${PLUGIN_SERVER_PROPERTIES_FILE}" ]]; then
+  echo "Required file not found: ${PLUGIN_SERVER_PROPERTIES_FILE}" >&2
+  exit 1
+fi
+
+if (has_component "plugins" || has_component "plugin-server") && [[ ! -f "${SYNC_PLUGIN_VERSIONS_SCRIPT}" ]]; then
   echo "Required file not found: ${SYNC_PLUGIN_VERSIONS_SCRIPT}" >&2
   exit 1
 fi
 
-for dir in "${CONSOLE_DIR}" "${PLUGIN_SERVER_DIR}" "${CONSOLE_PLUGIN_RESOURCE_DIR}"; do
+for dir in "${CONSOLE_DIR}"; do
   if [[ ! -d "${dir}" ]]; then
     echo "Required directory not found: ${dir}" >&2
     exit 1
   fi
 done
 
+if (has_component "plugins" || has_component "plugin-server") && [[ ! -d "${PLUGIN_SERVER_DIR}" ]]; then
+  echo "Required directory not found: ${PLUGIN_SERVER_DIR}" >&2
+  exit 1
+fi
+
+if (has_component "plugins" || has_component "plugin-server") && [[ ! -d "${CONSOLE_PLUGIN_RESOURCE_DIR}" ]]; then
+  echo "Required directory not found: ${CONSOLE_PLUGIN_RESOURCE_DIR}" >&2
+  exit 1
+fi
+
 if has_component "portal" && [[ ! -d "${PORTAL_DIR}" ]]; then
   echo "Required directory not found: ${PORTAL_DIR}" >&2
   exit 1
 fi
 
+if has_component "console" && [[ ! -d "${PORTAL_DIR}/backend" ]]; then
+  echo "Required directory not found: ${PORTAL_DIR}/backend" >&2
+  exit 1
+fi
+
 need_cmd docker
 need_cmd make
-need_cmd python3
 need_cmd tar
 need_cmd file
 need_cmd go
+need_cmd md5sum
+need_cmd stat
 
 sync_plugin_versions() {
   local cmd=(
-    python3
     "${SYNC_PLUGIN_VERSIONS_SCRIPT}"
     --higress-dir "${HIGRESS_DIR}"
     --console-plugin-properties-file "${CONSOLE_PLUGIN_PROPERTIES_FILE}"
@@ -282,102 +316,92 @@ sync_plugin_versions() {
   PLUGIN_VERSIONS_SYNCED=true
 }
 
-if has_component "console" || has_component "plugins" || has_component "plugin-server"; then
+if has_component "plugins" || has_component "plugin-server"; then
   sync_plugin_versions
 fi
 
-if ! PARSED_IMAGE_VALUES="$(
-python3 - "${WRAPPER_VALUES_FILE}" "${CORE_VALUES_FILE}" "${CONSOLE_VALUES_FILE}" <<'PY'
-import shlex
-import sys
-import yaml
-
-wrapper_path, core_path, console_path = sys.argv[1:4]
-
-with open(wrapper_path, "r", encoding="utf-8") as f:
-    wrapper = yaml.safe_load(f) or {}
-with open(core_path, "r", encoding="utf-8") as f:
-    core = yaml.safe_load(f) or {}
-with open(console_path, "r", encoding="utf-8") as f:
-    console = yaml.safe_load(f) or {}
-
-def get(data, *path):
-    cur = data
-    for key in path:
-        if not isinstance(cur, dict):
-            return ""
-        cur = cur.get(key)
-    return "" if cur is None else cur
-
-def coalesce(*values):
-    for value in values:
-        if value != "":
-            return value
-    return ""
-
-values = {
-    "AIGATEWAY_REPOSITORY": get(console, "certmanager", "image", "repository"),
-    "AIGATEWAY_TAG": get(console, "certmanager", "image", "tag"),
-    "CONTROLLER_REPOSITORY": get(wrapper, "higress-core", "controller", "repository"),
-    "CONTROLLER_TAG": get(wrapper, "higress-core", "controller", "tag"),
-    "GATEWAY_REPOSITORY": get(wrapper, "higress-core", "gateway", "repository"),
-    "GATEWAY_TAG": get(wrapper, "higress-core", "gateway", "tag"),
-    "PILOT_REPOSITORY": get(wrapper, "higress-core", "pilot", "repository"),
-    "PILOT_TAG": get(wrapper, "higress-core", "pilot", "tag"),
-    "PLUGIN_SERVER_REPOSITORY": get(wrapper, "higress-core", "pluginServer", "repository"),
-    "PLUGIN_SERVER_TAG": get(wrapper, "higress-core", "pluginServer", "tag"),
-    "CONSOLE_REPOSITORY": get(wrapper, "aigateway-console", "image", "repository"),
-    "CONSOLE_TAG": get(wrapper, "aigateway-console", "image", "tag"),
-    "PORTAL_BACKEND_REPOSITORY": coalesce(
-        get(wrapper, "aigateway-portal", "backend", "image", "repository"),
-        get(wrapper, "aigateway-portal", "image", "repository"),
-    ),
-    "PORTAL_BACKEND_TAG": coalesce(
-        get(wrapper, "aigateway-portal", "backend", "image", "tag"),
-        get(wrapper, "aigateway-portal", "image", "tag"),
-    ),
+coalesce() {
+  local value
+  for value in "$@"; do
+    if [[ -n "${value}" ]]; then
+      printf '%s\n' "${value}"
+      return 0
+    fi
+  done
+  printf '\n'
 }
 
-checks = [
-    ("certmanager.image.repository", values["AIGATEWAY_REPOSITORY"], get(wrapper, "aigateway-console", "certmanager", "image", "repository")),
-    ("certmanager.image.tag", values["AIGATEWAY_TAG"], get(wrapper, "aigateway-console", "certmanager", "image", "tag")),
-    ("controller.repository", values["CONTROLLER_REPOSITORY"], get(core, "controller", "repository")),
-    ("controller.tag", values["CONTROLLER_TAG"], get(core, "controller", "tag")),
-    ("gateway.repository", values["GATEWAY_REPOSITORY"], get(core, "gateway", "repository")),
-    ("gateway.tag", values["GATEWAY_TAG"], get(core, "gateway", "tag")),
-    ("pilot.repository", values["PILOT_REPOSITORY"], get(core, "pilot", "repository")),
-    ("pilot.tag", values["PILOT_TAG"], get(core, "pilot", "tag")),
-    ("pluginServer.repository", values["PLUGIN_SERVER_REPOSITORY"], get(core, "pluginServer", "repository")),
-    ("pluginServer.tag", values["PLUGIN_SERVER_TAG"], get(core, "pluginServer", "tag")),
-    ("console.image.repository", values["CONSOLE_REPOSITORY"], get(console, "image", "repository")),
-    ("console.image.tag", values["CONSOLE_TAG"], get(console, "image", "tag")),
-]
+AIGATEWAY_REPOSITORY="$(yaml_get_scalar "${CONSOLE_VALUES_FILE}" "certmanager.image.repository")"
+AIGATEWAY_TAG="$(yaml_get_scalar "${CONSOLE_VALUES_FILE}" "certmanager.image.tag")"
+CONTROLLER_REPOSITORY="$(yaml_get_scalar "${WRAPPER_VALUES_FILE}" "higress-core.controller.repository")"
+CONTROLLER_TAG="$(yaml_get_scalar "${WRAPPER_VALUES_FILE}" "higress-core.controller.tag")"
+GATEWAY_REPOSITORY="$(yaml_get_scalar "${WRAPPER_VALUES_FILE}" "higress-core.gateway.repository")"
+GATEWAY_TAG="$(yaml_get_scalar "${WRAPPER_VALUES_FILE}" "higress-core.gateway.tag")"
+PILOT_REPOSITORY="$(yaml_get_scalar "${WRAPPER_VALUES_FILE}" "higress-core.pilot.repository")"
+PILOT_TAG="$(yaml_get_scalar "${WRAPPER_VALUES_FILE}" "higress-core.pilot.tag")"
+PLUGIN_SERVER_REPOSITORY="$(yaml_get_scalar "${WRAPPER_VALUES_FILE}" "higress-core.pluginServer.repository")"
+PLUGIN_SERVER_TAG="$(yaml_get_scalar "${WRAPPER_VALUES_FILE}" "higress-core.pluginServer.tag")"
+CONSOLE_REPOSITORY="$(yaml_get_scalar "${WRAPPER_VALUES_FILE}" "aigateway-console.image.repository")"
+CONSOLE_TAG="$(yaml_get_scalar "${WRAPPER_VALUES_FILE}" "aigateway-console.image.tag")"
+PORTAL_BACKEND_REPOSITORY="$(coalesce \
+  "$(yaml_get_scalar "${WRAPPER_VALUES_FILE}" "aigateway-portal.backend.image.repository")" \
+  "$(yaml_get_scalar "${WRAPPER_VALUES_FILE}" "aigateway-portal.image.repository")")"
+PORTAL_BACKEND_TAG="$(coalesce \
+  "$(yaml_get_scalar "${WRAPPER_VALUES_FILE}" "aigateway-portal.backend.image.tag")" \
+  "$(yaml_get_scalar "${WRAPPER_VALUES_FILE}" "aigateway-portal.image.tag")")"
 
-errors = []
-for name, wrapper_value, standalone_value in checks:
-    if str(wrapper_value) != str(standalone_value):
-        errors.append(
-            f"Values mismatch for {name}: wrapper={wrapper_value!r}, standalone={standalone_value!r}"
-        )
+declare -a VALUE_ERRORS=()
 
-required = [key for key, value in values.items() if value == ""]
-if required:
-    errors.append("Missing required image values: " + ", ".join(required))
+check_value_match() {
+  local name="$1"
+  local expected="$2"
+  local actual="$3"
+  if [[ "${expected}" != "${actual}" ]]; then
+    VALUE_ERRORS+=("Values mismatch for ${name}: wrapper='${expected}', standalone='${actual}'")
+  fi
+}
 
-if errors:
-    for error in errors:
-        print(error, file=sys.stderr)
-    sys.exit(1)
+check_required_value() {
+  local name="$1"
+  local value="$2"
+  if [[ -z "${value}" ]]; then
+    VALUE_ERRORS+=("Missing required image value: ${name}")
+  fi
+}
 
-for key, value in values.items():
-    print(f"{key}={shlex.quote(str(value))}")
-PY
-)"; then
+check_value_match "certmanager.image.repository" "${AIGATEWAY_REPOSITORY}" "$(yaml_get_scalar "${WRAPPER_VALUES_FILE}" "aigateway-console.certmanager.image.repository")"
+check_value_match "certmanager.image.tag" "${AIGATEWAY_TAG}" "$(yaml_get_scalar "${WRAPPER_VALUES_FILE}" "aigateway-console.certmanager.image.tag")"
+check_value_match "controller.repository" "${CONTROLLER_REPOSITORY}" "$(yaml_get_scalar "${CORE_VALUES_FILE}" "controller.repository")"
+check_value_match "controller.tag" "${CONTROLLER_TAG}" "$(yaml_get_scalar "${CORE_VALUES_FILE}" "controller.tag")"
+check_value_match "gateway.repository" "${GATEWAY_REPOSITORY}" "$(yaml_get_scalar "${CORE_VALUES_FILE}" "gateway.repository")"
+check_value_match "gateway.tag" "${GATEWAY_TAG}" "$(yaml_get_scalar "${CORE_VALUES_FILE}" "gateway.tag")"
+check_value_match "pilot.repository" "${PILOT_REPOSITORY}" "$(yaml_get_scalar "${CORE_VALUES_FILE}" "pilot.repository")"
+check_value_match "pilot.tag" "${PILOT_TAG}" "$(yaml_get_scalar "${CORE_VALUES_FILE}" "pilot.tag")"
+check_value_match "pluginServer.repository" "${PLUGIN_SERVER_REPOSITORY}" "$(yaml_get_scalar "${CORE_VALUES_FILE}" "pluginServer.repository")"
+check_value_match "pluginServer.tag" "${PLUGIN_SERVER_TAG}" "$(yaml_get_scalar "${CORE_VALUES_FILE}" "pluginServer.tag")"
+check_value_match "console.image.repository" "${CONSOLE_REPOSITORY}" "$(yaml_get_scalar "${CONSOLE_VALUES_FILE}" "image.repository")"
+check_value_match "console.image.tag" "${CONSOLE_TAG}" "$(yaml_get_scalar "${CONSOLE_VALUES_FILE}" "image.tag")"
+
+check_required_value "AIGATEWAY_REPOSITORY" "${AIGATEWAY_REPOSITORY}"
+check_required_value "AIGATEWAY_TAG" "${AIGATEWAY_TAG}"
+check_required_value "CONTROLLER_REPOSITORY" "${CONTROLLER_REPOSITORY}"
+check_required_value "CONTROLLER_TAG" "${CONTROLLER_TAG}"
+check_required_value "GATEWAY_REPOSITORY" "${GATEWAY_REPOSITORY}"
+check_required_value "GATEWAY_TAG" "${GATEWAY_TAG}"
+check_required_value "PILOT_REPOSITORY" "${PILOT_REPOSITORY}"
+check_required_value "PILOT_TAG" "${PILOT_TAG}"
+check_required_value "PLUGIN_SERVER_REPOSITORY" "${PLUGIN_SERVER_REPOSITORY}"
+check_required_value "PLUGIN_SERVER_TAG" "${PLUGIN_SERVER_TAG}"
+check_required_value "CONSOLE_REPOSITORY" "${CONSOLE_REPOSITORY}"
+check_required_value "CONSOLE_TAG" "${CONSOLE_TAG}"
+check_required_value "PORTAL_BACKEND_REPOSITORY" "${PORTAL_BACKEND_REPOSITORY}"
+check_required_value "PORTAL_BACKEND_TAG" "${PORTAL_BACKEND_TAG}"
+
+if [[ ${#VALUE_ERRORS[@]} -gt 0 ]]; then
+  printf '%s\n' "${VALUE_ERRORS[@]}" >&2
   echo "Failed to resolve image tags from values files. Please fix the mismatch above and retry." >&2
   exit 1
 fi
-
-eval "${PARSED_IMAGE_VALUES}"
 
 HIGRESS_BASE_VERSION="${HIGRESS_BASE_VERSION:-$(resolve_makefile_export HIGRESS_BASE_VERSION || true)}"
 if [[ -z "${HIGRESS_BASE_VERSION}" ]]; then
@@ -491,12 +515,27 @@ build_pilot() {
 build_console() {
   local target_image="${CONSOLE_REPOSITORY}:${CONSOLE_TAG}"
 
-  # Force a fresh frontend bundle to avoid stale static artifacts in the image.
+  # Rebuild the frontend bundle and copy it into the Go backend's static resource directory
+  # before building the final console image.
   run rm -rf "${CONSOLE_DIR}/frontend/.ice" "${CONSOLE_DIR}/frontend/build"
-  run rm -rf "${CONSOLE_DIR}/backend/console/src/main/resources/static"
+  run rm -rf "${CONSOLE_DIR}/backend/resource/public/html"
+  run mkdir -p "${CONSOLE_DIR}/backend/resource/public/html"
+
+  run_in_dir "${CONSOLE_DIR}/frontend" \
+    npm install
+  run_in_dir "${CONSOLE_DIR}/frontend" \
+    npm run build
+
+  run cp -R "${CONSOLE_DIR}/frontend/build/." "${CONSOLE_DIR}/backend/resource/public/html/"
 
   run_in_dir "${CONSOLE_DIR}/backend" \
-    env IMAGE_NAME="${target_image}" VERSION="${CONSOLE_TAG}" ./build.sh
+    docker build \
+      --platform "linux/${ARCH}" \
+      --build-context "portal_backend=${PORTAL_DIR}/backend" \
+      --build-arg TARGETARCH="${ARCH}" \
+      -f Dockerfile.monorepo \
+      -t "${target_image}" \
+      .
 }
 
 build_portal() {
@@ -518,96 +557,91 @@ prepare_plugin_build_plan() {
 
   PLUGIN_BUILD_PLAN_FILE="$(mktemp)"
 
-  python3 - "${CONSOLE_PLUGIN_PROPERTIES_FILE}" "${PLUGIN_SERVER_PROPERTIES_FILE}" "${HIGRESS_DIR}" "${CONSOLE_PLUGIN_RESOURCE_DIR}" > "${PLUGIN_BUILD_PLAN_FILE}" <<'PY'
-from pathlib import Path
-import sys
+  declare -A plugin_versions=()
+  local file line plugin_name raw_value version plugin_type source_dir resource_dir
 
-console_props = Path(sys.argv[1])
-plugin_server_props = Path(sys.argv[2])
-higress_dir = Path(sys.argv[3])
-console_resource_root = Path(sys.argv[4])
+  while IFS= read -r line; do
+    [[ -z "${line}" || "${line}" =~ ^[[:space:]]*# ]] && continue
+    [[ "${line}" == *"="* ]] || continue
+    plugin_name="$(dev_trim "${line%%=*}")"
+    raw_value="$(dev_trim "${line#*=}")"
+    version="${raw_value##*:}"
+    if [[ -n "${plugin_versions[${plugin_name}]:-}" && "${plugin_versions[${plugin_name}]}" != "${version}" ]]; then
+      dev_die "Version mismatch for plugin ${plugin_name}: ${plugin_versions[${plugin_name}]} vs ${version}"
+    fi
+    plugin_versions["${plugin_name}"]="${version}"
+  done < <(cat "${CONSOLE_PLUGIN_PROPERTIES_FILE}" "${PLUGIN_SERVER_PROPERTIES_FILE}")
 
-alias_map = {
-    "json-converter": "jsonrpc-converter",
-}
+  : > "${PLUGIN_BUILD_PLAN_FILE}"
+  while IFS= read -r plugin_name; do
+    plugin_type=""
+    source_dir=""
+    for candidate in \
+      "go|${HIGRESS_DIR}/plugins/wasm-go/extensions/${plugin_name}" \
+      "rust|${HIGRESS_DIR}/plugins/wasm-rust/extensions/${plugin_name}" \
+      "cpp|${HIGRESS_DIR}/plugins/wasm-cpp/extensions/${plugin_name//-/_}"
+    do
+      IFS='|' read -r plugin_type source_dir <<< "${candidate}"
+      if [[ -d "${source_dir}" ]]; then
+        break
+      fi
+      plugin_type=""
+      source_dir=""
+    done
 
-def load_properties(path):
-    result = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        name, value = line.split("=", 1)
-        name = name.strip()
-        value = value.strip()
-        image_ref = value.replace("oci://", "", 1)
-        version = image_ref.rsplit(":", 1)[-1]
-        result[name] = version
-    return result
+    if [[ -z "${source_dir}" && "${plugin_name}" == "json-converter" ]]; then
+      for candidate in \
+        "go|${HIGRESS_DIR}/plugins/wasm-go/extensions/jsonrpc-converter" \
+        "rust|${HIGRESS_DIR}/plugins/wasm-rust/extensions/jsonrpc-converter" \
+        "cpp|${HIGRESS_DIR}/plugins/wasm-cpp/extensions/jsonrpc_converter"
+      do
+        IFS='|' read -r plugin_type source_dir <<< "${candidate}"
+        if [[ -d "${source_dir}" ]]; then
+          break
+        fi
+        plugin_type=""
+        source_dir=""
+      done
+    fi
 
-versions = {}
-for path in (console_props, plugin_server_props):
-    for name, version in load_properties(path).items():
-        previous = versions.get(name)
-        if previous and previous != version:
-            raise SystemExit(f"Version mismatch for plugin {name}: {previous} vs {version}")
-        versions[name] = version
+    [[ -n "${source_dir}" ]] || dev_die "No local source found for plugin ${plugin_name}"
 
-def resolve_source(name):
-    candidates = [
-        ("go", higress_dir / "plugins/wasm-go/extensions" / name),
-        ("rust", higress_dir / "plugins/wasm-rust/extensions" / name),
-        ("cpp", higress_dir / "plugins/wasm-cpp/extensions" / name.replace("-", "_")),
-    ]
-    alias = alias_map.get(name)
-    if alias:
-        candidates.extend([
-            ("go", higress_dir / "plugins/wasm-go/extensions" / alias),
-            ("rust", higress_dir / "plugins/wasm-rust/extensions" / alias),
-            ("cpp", higress_dir / "plugins/wasm-cpp/extensions" / alias.replace("-", "_")),
-        ])
+    resource_dir="${CONSOLE_PLUGIN_RESOURCE_DIR}/${plugin_name}"
+    if [[ ! -d "${resource_dir}" ]]; then
+      resource_dir="${source_dir}"
+    fi
 
-    for plugin_type, source_dir in candidates:
-        if source_dir.is_dir():
-            return plugin_type, source_dir
-    raise SystemExit(f"No local source found for plugin {name}")
-
-for name in sorted(versions):
-    plugin_type, source_dir = resolve_source(name)
-    resource_dir = console_resource_root / name
-    if not resource_dir.is_dir():
-        resource_dir = source_dir
-    print("\t".join([name, versions[name], plugin_type, str(source_dir), str(resource_dir)]))
-PY
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+      "${plugin_name}" \
+      "${plugin_versions[${plugin_name}]}" \
+      "${plugin_type}" \
+      "${source_dir}" \
+      "${resource_dir}" >> "${PLUGIN_BUILD_PLAN_FILE}"
+  done < <(printf '%s\n' "${!plugin_versions[@]}" | sort)
 }
 
 write_plugin_metadata() {
   local plugin_dir="$1"
   local plugin_name="$2"
+  local wasm_path="${plugin_dir}/plugin.wasm"
+  local metadata_path="${plugin_dir}/metadata.txt"
+  local md5 size mtime ctime
 
-  run python3 - "${plugin_dir}" "${plugin_name}" <<'PY'
-import hashlib
-import os
-import sys
-from datetime import datetime
+  md5="$(md5sum "${wasm_path}" | awk '{print $1}')"
+  size="$(stat -c %s "${wasm_path}")"
+  mtime="$(date -d "@$(stat -c %Y "${wasm_path}")" '+%Y-%m-%dT%H:%M:%S%z')"
+  ctime="$(date -d "@$(stat -c %Z "${wasm_path}")" '+%Y-%m-%dT%H:%M:%S%z')"
 
-plugin_dir = sys.argv[1]
-plugin_name = sys.argv[2]
-wasm_path = os.path.join(plugin_dir, "plugin.wasm")
-
-with open(wasm_path, "rb") as f:
-    md5 = hashlib.md5(f.read()).hexdigest()
-
-stat_info = os.stat(wasm_path)
-metadata_path = os.path.join(plugin_dir, "metadata.txt")
-
-with open(metadata_path, "w", encoding="utf-8") as f:
-    f.write(f"Plugin Name: {plugin_name}\n")
-    f.write(f"Size: {stat_info.st_size} bytes\n")
-    f.write(f"Last Modified: {datetime.fromtimestamp(stat_info.st_mtime).isoformat()}\n")
-    f.write(f"Created: {datetime.fromtimestamp(stat_info.st_ctime).isoformat()}\n")
-    f.write(f"MD5: {md5}\n")
-PY
+  echo "+ write metadata ${metadata_path}"
+  if [[ "${DRY_RUN}" != "true" ]]; then
+    cat > "${metadata_path}" <<EOF
+Plugin Name: ${plugin_name}
+Size: ${size} bytes
+Last Modified: ${mtime}
+Created: ${ctime}
+MD5: ${md5}
+EOF
+  fi
 }
 
 copy_plugin_doc_file() {

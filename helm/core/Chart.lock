@@ -1,0 +1,12 @@
+dependencies:
+- name: redis
+  repository: file://charts/redis-ha
+  version: 25.3.11
+- name: postgresql-ha
+  repository: file://charts/postgresql-ha
+  version: 16.3.2
+- name: mysql
+  repository: file://charts/mysql
+  version: 8.0.0
+digest: sha256:6fb57aea5bdb8840ebd2849e179c96999d82e0d85235250384e8e3f8deacadb4
+generated: "2026-04-17T19:43:04.238388075+08:00"

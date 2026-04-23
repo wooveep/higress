@@ -63,7 +63,7 @@ In `amount` mode:
 - Request admission checks the consumer balance and model pricing.
 - Missing pricing or non-positive balance will reject the request and emit an audit event.
 - Successful responses are charged using the real token usage reported by the upstream model.
-- The plugin writes a usage event into Redis Stream, and the backend billing consumer persists it into MySQL.
+- The plugin writes a usage event into Redis Stream, and the backend billing consumer persists it into PostgreSQL.
 - Daily, weekly, and monthly amount-window TTLs are derived from the Shanghai calendar rather than the host machine timezone.
 
 ### Detailed Billing Semantics In `amount` Mode

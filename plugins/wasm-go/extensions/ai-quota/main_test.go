@@ -17,6 +17,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"testing"
 	"time"
 
@@ -24,6 +25,23 @@ import (
 	"github.com/higress-group/wasm-go/pkg/test"
 	"github.com/stretchr/testify/require"
 )
+
+func redisCalloutQueries(t *testing.T, host test.TestHost) []string {
+	t.Helper()
+
+	hostValue := reflect.ValueOf(host)
+	require.Equal(t, reflect.Ptr, hostValue.Kind())
+
+	contextField := hostValue.Elem().FieldByName("currentContextID")
+	require.True(t, contextField.IsValid())
+
+	attrs := host.GetRedisCalloutAttributesFromContext(uint32(contextField.Uint()))
+	queries := make([]string, 0, len(attrs))
+	for _, item := range attrs {
+		queries = append(queries, string(item.Query))
+	}
+	return queries
+}
 
 // 测试配置：基础配置
 var basicConfig = func() json.RawMessage {
@@ -376,6 +394,131 @@ func TestOnHttpStreamingResponseBody(t *testing.T) {
 			result := host.GetResponseBody()
 			require.Equal(t, data, result)
 		})
+
+		t.Run("amount mode emits interrupted usage event on stream done when usage was captured", func(t *testing.T) {
+			host, status := test.NewTestHost(amountConfig)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			action := host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+				{":path", "/v1/chat/completions"},
+				{":method", "POST"},
+				{"x-mse-consumer", "consumer1"},
+			})
+			require.Equal(t, types.HeaderStopIteration, action)
+
+			action = host.CallOnHttpRequestBody([]byte(`{"model":"qwen-plus","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+			require.Equal(t, types.ActionPause, action)
+
+			host.CallOnRedisCall(0, test.CreateRedisRespArray([]interface{}{
+				"model_id", "qwen-plus",
+				"price_version_id", "1",
+				"input_price_per_1k_micro_yuan", "1000",
+				"output_price_per_1k_micro_yuan", "2000",
+			}))
+			host.CallOnRedisCall(0, test.CreateRedisRespArray([]interface{}{1, "ok", 1000000}))
+
+			action = host.GetHttpStreamAction()
+			require.Equal(t, types.ActionContinue, action)
+
+			action = host.CallOnHttpStreamingResponseBody([]byte(`data: {"usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20}}`), false)
+			require.Equal(t, types.ActionContinue, action)
+
+			require.Empty(t, redisCalloutQueries(t, host))
+			host.CompleteHttp()
+
+			queries := redisCalloutQueries(t, host)
+			require.Len(t, queries, 1)
+			lastQuery := queries[len(queries)-1]
+			require.Contains(t, lastQuery, "stream_interrupted")
+			require.Contains(t, lastQuery, "parsed")
+			require.Contains(t, lastQuery, "failed")
+			require.Contains(t, lastQuery, "499")
+			require.Contains(t, lastQuery, "20")
+			require.Contains(t, lastQuery, "28")
+		})
+
+		t.Run("amount mode emits interrupted audit event when no usage was captured", func(t *testing.T) {
+			host, status := test.NewTestHost(amountConfig)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			action := host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+				{":path", "/v1/chat/completions"},
+				{":method", "POST"},
+				{"x-mse-consumer", "consumer1"},
+			})
+			require.Equal(t, types.HeaderStopIteration, action)
+
+			action = host.CallOnHttpRequestBody([]byte(`{"model":"qwen-plus","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+			require.Equal(t, types.ActionPause, action)
+
+			host.CallOnRedisCall(0, test.CreateRedisRespArray([]interface{}{
+				"model_id", "qwen-plus",
+				"price_version_id", "1",
+				"input_price_per_1k_micro_yuan", "1000",
+				"output_price_per_1k_micro_yuan", "2000",
+			}))
+			host.CallOnRedisCall(0, test.CreateRedisRespArray([]interface{}{1, "ok", 1000000}))
+
+			action = host.GetHttpStreamAction()
+			require.Equal(t, types.ActionContinue, action)
+
+			action = host.CallOnHttpStreamingResponseBody([]byte(`data: {"choices":[{"delta":{"content":"partial"}}]}`), false)
+			require.Equal(t, types.ActionContinue, action)
+
+			require.Empty(t, redisCalloutQueries(t, host))
+			host.CompleteHttp()
+
+			queries := redisCalloutQueries(t, host)
+			require.Len(t, queries, 1)
+			lastQuery := queries[len(queries)-1]
+			require.Contains(t, lastQuery, "stream_interrupted")
+			require.Contains(t, lastQuery, "missing")
+			require.Contains(t, lastQuery, "499")
+		})
+
+		t.Run("amount mode end of stream does not double emit on stream done", func(t *testing.T) {
+			host, status := test.NewTestHost(amountConfig)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			action := host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+				{":path", "/v1/chat/completions"},
+				{":method", "POST"},
+				{"x-mse-consumer", "consumer1"},
+			})
+			require.Equal(t, types.HeaderStopIteration, action)
+
+			action = host.CallOnHttpRequestBody([]byte(`{"model":"qwen-plus","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+			require.Equal(t, types.ActionPause, action)
+
+			host.CallOnRedisCall(0, test.CreateRedisRespArray([]interface{}{
+				"model_id", "qwen-plus",
+				"price_version_id", "1",
+				"input_price_per_1k_micro_yuan", "1000",
+				"output_price_per_1k_micro_yuan", "2000",
+			}))
+			host.CallOnRedisCall(0, test.CreateRedisRespArray([]interface{}{1, "ok", 1000000}))
+
+			action = host.GetHttpStreamAction()
+			require.Equal(t, types.ActionContinue, action)
+
+			action = host.CallOnHttpStreamingResponseBody([]byte(`data: {"usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20}}`), true)
+			require.Equal(t, types.ActionContinue, action)
+
+			queriesBeforeDone := redisCalloutQueries(t, host)
+			require.Len(t, queriesBeforeDone, 1)
+			lastQuery := queriesBeforeDone[len(queriesBeforeDone)-1]
+			require.Contains(t, lastQuery, "parsed")
+			require.NotContains(t, lastQuery, "stream_interrupted")
+
+			host.CompleteHttp()
+			require.Len(t, redisCalloutQueries(t, host), 1)
+		})
 	})
 }
 
@@ -422,6 +565,13 @@ func TestGetOperationMode(t *testing.T) {
 			chatMode:  ChatModeNone,
 			adminMode: AdminModeNone,
 		},
+		{
+			name:      "image generation mode",
+			path:      "/v1/images/generations",
+			adminPath: "/quota",
+			chatMode:  ChatModeCompletion,
+			adminMode: AdminModeNone,
+		},
 	}
 
 	for _, tt := range tests {
@@ -431,6 +581,12 @@ func TestGetOperationMode(t *testing.T) {
 			require.Equal(t, tt.adminMode, adminMode)
 		})
 	}
+}
+
+func TestRequestKindFromPath(t *testing.T) {
+	require.Equal(t, "images.generations", requestKindFromPath("/v1/images/generations"))
+	require.Equal(t, "chat.completions", requestKindFromPath("/v1/chat/completions"))
+	require.Equal(t, "unknown", requestKindFromPath("/other/path"))
 }
 
 func TestBuildAmountChargeArgs(t *testing.T) {

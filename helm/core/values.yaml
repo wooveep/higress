@@ -33,6 +33,48 @@ mysql:
   affinity: {}
   tolerations: []
 
+postgresql:
+  enabled: false
+  fullnameOverride: ""
+  global:
+    imageRegistry: ""
+  postgresql:
+    username: portal
+    password: portal
+    database: aigateway_portal
+    postgresPassword: postgres
+    replicaCount: 3
+    pdb:
+      create: true
+      minAvailable: 1
+    image:
+      registry: docker.io
+      repository: bitnamilegacy/postgresql-repmgr
+      tag: 17.6.0-debian-12-r2
+      pullPolicy: IfNotPresent
+    affinity: {}
+    nodeSelector: {}
+    tolerations: []
+    initdbScripts:
+      00-enable-vector.sql: |
+        CREATE EXTENSION IF NOT EXISTS vector;
+    persistence:
+      enabled: true
+      size: 10Gi
+  pgpool:
+    replicaCount: 2
+    pdb:
+      create: true
+      minAvailable: 1
+    image:
+      registry: docker.io
+      repository: bitnamilegacy/pgpool
+      tag: 4.6.3-debian-12-r0
+      pullPolicy: IfNotPresent
+    affinity: {}
+    nodeSelector: {}
+    tolerations: []
+
 global:
   enableH3: false
   enableIPv6: false
@@ -403,6 +445,7 @@ global:
   o11y:
     enabled: false
     promtail:
+      enabled: true
       image:
         repository: "" # Will use global.hub if not set
         tag: 2.9.4
@@ -458,6 +501,10 @@ gateway:
   # -- Full image repository for the gateway container. If set, it overrides hub/image.
   repository: ""
   image: gateway
+
+  # -- Specify image pull policy if default behavior isn't desired.
+  # Default behavior: latest images will be Always else IfNotPresent.
+  imagePullPolicy: ""
 
   # -- Use a `DaemonSet` or `Deployment`
   kind: Deployment
@@ -570,6 +617,10 @@ gateway:
 
   topologySpreadConstraints: []
 
+  pdb:
+    enabled: false
+    minAvailable: 1
+
   # -- If specified, the gateway will act as a network gateway for the given network.
   networkGateway: ""
 
@@ -616,6 +667,10 @@ controller:
     initialDelaySeconds: 1
     periodSeconds: 3
     timeoutSeconds: 5
+
+  # -- Specify image pull policy if default behavior isn't desired.
+  # Default behavior: latest images will be Always else IfNotPresent.
+  imagePullPolicy: ""
 
   imagePullSecrets: []
 
@@ -681,6 +736,10 @@ controller:
 
   topologySpreadConstraints: []
 
+  pdb:
+    enabled: false
+    minAvailable: 1
+
   autoscaling:
     enabled: false
     minReplicas: 1
@@ -692,13 +751,6 @@ controller:
 
 ## -- Discovery Settings
 pilot:
-  autoscaleEnabled: false
-  autoscaleMin: 1
-  autoscaleMax: 5
-  replicaCount: 1
-  rollingMaxSurge: 100%
-  rollingMaxUnavailable: 25%
-
   hub: "" # Will use global.hub if not set
   tag: ""
 
@@ -727,20 +779,10 @@ pilot:
   # -- if protocol sniffing is enabled for inbound
   enableProtocolSniffingForInbound: true
 
-  nodeSelector: {}
-  podAnnotations: {}
-  serviceAnnotations: {}
-
   # -- You can use jwksResolverExtraRootCA to provide a root certificate
   # in PEM format. This will then be trusted by pilot when resolving
   # JWKS URIs.
   jwksResolverExtraRootCA: ""
-
-  # -- This is used to set the source of configuration for
-  # the associated address in configSource, if nothing is specified
-  # the default MCP is assumed.
-  configSource:
-    subscribedResources: []
 
   plugins: []
 
@@ -748,18 +790,6 @@ pilot:
   # to a pilot. It balances out load across pilot instances at the cost of
   # increasing system churn.
   keepaliveMaxServerConnectionAge: 30m
-
-  # -- Additional labels to apply to the deployment.
-  deploymentLabels: {}
-
-  ## Mesh config settings
-
-  # -- Install the mesh config map, generated from values.yaml.
-  # If false, pilot wil use default values (by default) or user-supplied values.
-  configMap: true
-
-  # -- Additional labels to apply on the pod level for monitoring and logging configuration.
-  podLabels: {}
 
 # Tracing config settings
 tracing:
@@ -811,43 +841,61 @@ gzip:
   compressionStrategy: "DEFAULT_STRATEGY"
 
 redis:
-  redis:
-    name: redis-stack-server
-    # -- Full image repository for Redis. If set, it overrides hub/image.
-    repository: ""
-    # -- Specify the image
-    image: "redis-stack-server"
-    # -- Specify the tag
-    tag: "7.4.0"
-    # -- Specify the number of replicas
-    replicas: 1
-    # -- Specify the password, if not set, no password is used
-    password: ""
-    # -- Service parameters
+  enabled: false
+  fullnameOverride: ""
+  global:
+    imageRegistry: ""
+  architecture: replication
+  auth:
+    enabled: true
+    sentinel: true
+    password: aigateway-redis
+    existingSecret: ""
+    existingSecretPasswordKey: password
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/redis
+    tag: 8.0.3-debian-12-r2
+    pullPolicy: IfNotPresent
+  sentinel:
+    enabled: true
+    image:
+      registry: docker.io
+      repository: bitnamilegacy/redis-sentinel
+      tag: 8.0.3-debian-12-r2
+      pullPolicy: IfNotPresent
+    masterService:
+      enabled: true
     service:
-      # -- Exporter service type
-      type: ClusterIP
-      # -- Exporter service port
-      port: 6379
-    # -- Specify the resources
-    resources: {}
-    # -- NodeSelector Node labels for Redis
-    nodeSelector: {}
-    # -- Tolerations for Redis
-    tolerations: []
-    # -- Affinity for Redis
-    affinity: {}
+      ports:
+        redis: 6379
+        sentinel: 26379
+  rbac:
+    create: true
+  serviceAccount:
+    create: true
+    automountServiceAccountToken: true
+  metrics:
+    enabled: false
+  master:
+    count: 1
     persistence:
-      # -- Enable persistence on Redis, default is false
-      enabled: false
-      # -- If defined, storageClassName: <storageClass>
-      # -- If undefined (the default) or set to null, no storageClassName spec is set, choosing the default provisioner
-      storageClass: ""
-      # -- Persistent Volume access modes
-      accessModes:
-        - ReadWriteOnce
-      # -- Persistent Volume size
+      enabled: true
       size: 1Gi
+    resources: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+  replica:
+    replicaCount: 2
+    automountServiceAccountToken: true
+    persistence:
+      enabled: true
+      size: 1Gi
+    resources: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
 
 pluginServer:
   name: "aigateway-plugin-server"
@@ -859,6 +907,10 @@ pluginServer:
 
   hub: "" # Will use global.hub if not set
   tag: ""
+
+  # -- Specify image pull policy if default behavior isn't desired.
+  # Default behavior: latest images will be Always else IfNotPresent.
+  imagePullPolicy: ""
 
   imagePullSecrets: []
 
@@ -877,3 +929,15 @@ pluginServer:
     limits:
       cpu: 500m
       memory: 256Mi
+
+  nodeSelector: {}
+
+  tolerations: []
+
+  affinity: {}
+
+  topologySpreadConstraints: []
+
+  pdb:
+    enabled: false
+    minAvailable: 1

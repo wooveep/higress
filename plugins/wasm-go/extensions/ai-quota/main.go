@@ -35,6 +35,7 @@ const (
 	defaultUserUsageKeyPrefix    = "billing:quota-usage:user:"
 	defaultKeyUsageKeyPrefix     = "billing:quota-usage:key:"
 	defaultQuotaNoopPrefix       = "billing:quota:noop:"
+	ctxKeyAmountEventDispatched  = "amount_event_dispatched"
 	ctxKeyRequestModelPrice      = "request_model_price"
 	ctxKeyRequestModelName       = "request_model_name"
 	ctxKeyRequestAPIKeyID        = "request_api_key_id"
@@ -72,6 +73,7 @@ func init() {
 		wrapper.ProcessRequestHeaders(onHttpRequestHeaders),
 		wrapper.ProcessRequestBody(onHttpRequestBody),
 		wrapper.ProcessStreamingResponseBody(onHttpStreamingResponseBody),
+		wrapper.ProcessStreamDone(onHttpStreamDone),
 	)
 }
 
@@ -371,6 +373,41 @@ func onHttpStreamingResponseBody(ctx wrapper.HttpContext, config QuotaConfig, da
 	return data
 }
 
+func onHttpStreamDone(ctx wrapper.HttpContext, config QuotaConfig) {
+	if config.QuotaUnit != QuotaUnitAmount || isAmountEventDispatched(ctx) {
+		return
+	}
+
+	chatMode, ok := ctx.GetContext("chatMode").(ChatMode)
+	if !ok || chatMode != ChatModeCompletion {
+		return
+	}
+
+	consumer, ok := ctx.GetContext("consumer").(string)
+	if !ok || strings.TrimSpace(consumer) == "" {
+		return
+	}
+
+	statusCode := getResponseStatusCode()
+	if statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
+		statusCode = 499
+	}
+
+	modelName := resolveEventModelName(ctx)
+	if modelName == "" {
+		modelName = "unknown"
+	}
+
+	metrics := getDetailedUsageFromContext(ctx)
+	if metrics.TotalTokens() > 0 || metrics.InputImageCount > 0 || metrics.OutputImageCount > 0 {
+		emitAmountInterruptedUsageEvent(ctx, config, consumer, modelName, metrics, statusCode)
+		return
+	}
+
+	emitAmountAuditEvent(ctx, config, consumer, modelName, "failed", "missing", statusCode,
+		"stream_interrupted", "Streaming response terminated before final billable usage was emitted.")
+}
+
 func deniedNoKeyAuthData() types.Action {
 	util.SendResponse(http.StatusUnauthorized, "ai-quota.no_key", "text/plain", "Request denied by ai quota check. No Key Authentication information found.")
 	return types.ActionContinue
@@ -404,6 +441,7 @@ func isSupportedAIPath(path string) bool {
 		"/v1/completions",
 		"/v1/responses",
 		"/v1/embeddings",
+		"/v1/images/generations",
 	}
 	for _, item := range supported {
 		if strings.HasSuffix(path, item) {
@@ -423,6 +461,8 @@ func requestKindFromPath(path string) string {
 		return "responses"
 	case strings.HasSuffix(path, "/v1/embeddings"):
 		return "embeddings"
+	case strings.HasSuffix(path, "/v1/images/generations"):
+		return "images.generations"
 	default:
 		return "unknown"
 	}
@@ -561,22 +601,22 @@ func deltaQuota(ctx wrapper.HttpContext, config QuotaConfig, adminConsumer strin
 }
 
 type modelPrice struct {
-	ModelID                                             string
-	PriceVersion                                        int64
-	InputPer1K                                          int64
-	OutputPer1K                                         int64
-	InputRequestPriceMicroYuan                          int64
-	CacheCreationInputTokenPricePer1KMicroYuan          int64
-	CacheCreationInputTokenPriceAbove1hrPer1KMicroYuan  int64
-	CacheReadInputTokenPricePer1KMicroYuan              int64
-	InputTokenPriceAbove200kPer1KMicroYuan              int64
-	OutputTokenPriceAbove200kPer1KMicroYuan             int64
-	CacheCreationInputTokenPriceAbove200kPer1KMicroYuan int64
-	CacheReadInputTokenPriceAbove200kPer1KMicroYuan     int64
-	OutputImagePriceMicroYuan                           int64
-	OutputImageTokenPricePer1KMicroYuan                 int64
-	InputImagePriceMicroYuan                            int64
-	InputImageTokenPricePer1KMicroYuan                  int64
+	ModelID                                                string
+	PriceVersion                                           int64
+	InputMicroYuanPerToken                                 int64
+	OutputMicroYuanPerToken                                int64
+	InputRequestPriceMicroYuan                             int64
+	CacheCreationInputTokenPriceMicroYuanPerToken          int64
+	CacheCreationInputTokenPriceAbove1hrMicroYuanPerToken  int64
+	CacheReadInputTokenPriceMicroYuanPerToken              int64
+	InputTokenPriceAbove200kMicroYuanPerToken              int64
+	OutputTokenPriceAbove200kMicroYuanPerToken             int64
+	CacheCreationInputTokenPriceAbove200kMicroYuanPerToken int64
+	CacheReadInputTokenPriceAbove200kMicroYuanPerToken     int64
+	OutputImagePriceMicroYuan                              int64
+	OutputImageTokenPriceMicroYuanPerToken                 int64
+	InputImagePriceMicroYuan                               int64
+	InputImageTokenPriceMicroYuanPerToken                  int64
 }
 
 func quotaStorageKey(config QuotaConfig, consumer string) string {
@@ -622,12 +662,40 @@ func checkAmountQuota(ctx wrapper.HttpContext, config QuotaConfig, consumer stri
 }
 
 func emitAmountUsageEvent(ctx wrapper.HttpContext, config QuotaConfig, consumer string, modelName string, metrics detailedUsageMetrics, httpStatus int) {
+	emitAmountUsageEventWithStatus(ctx, config, consumer, modelName, metrics, httpStatus, "success", "", "")
+}
+
+func emitAmountInterruptedUsageEvent(ctx wrapper.HttpContext, config QuotaConfig, consumer string, modelName string, metrics detailedUsageMetrics, httpStatus int) {
+	emitAmountUsageEventWithStatus(
+		ctx,
+		config,
+		consumer,
+		modelName,
+		metrics,
+		httpStatus,
+		"failed",
+		"stream_interrupted",
+		"Streaming response terminated before final billable usage was emitted; charged with partial billable usage captured before interruption.",
+	)
+}
+
+func emitAmountUsageEventWithStatus(
+	ctx wrapper.HttpContext,
+	config QuotaConfig,
+	consumer string,
+	modelName string,
+	metrics detailedUsageMetrics,
+	httpStatus int,
+	requestStatus string,
+	errorCode string,
+	errorMessage string,
+) {
 	if storedPrice, ok := ctx.GetContext(ctxKeyRequestModelPrice).(modelPrice); ok {
 		billingModelName := normalizeModelName(storedPrice.ModelID)
 		if billingModelName == "" {
 			billingModelName = preferredBillingModelName(ctx.GetStringContext(ctxKeyRequestModelName, ""), modelName)
 		}
-		dispatchAmountCharge(ctx, config, consumer, billingModelName, storedPrice, metrics, httpStatus)
+		dispatchAmountCharge(ctx, config, consumer, billingModelName, storedPrice, metrics, httpStatus, requestStatus, errorCode, errorMessage)
 		return
 	}
 
@@ -635,21 +703,34 @@ func emitAmountUsageEvent(ctx wrapper.HttpContext, config QuotaConfig, consumer 
 	_ = config.redisClient.Command([]interface{}{"hgetall", priceKey}, func(response resp.Value) {
 		price, ok := parseModelPriceResponse(modelName, response)
 		if err := response.Error(); err != nil || !ok {
-			emitAmountAuditEvent(ctx, config, consumer, modelName, "success", "missing", httpStatus,
+			emitAmountAuditEvent(ctx, config, consumer, modelName, requestStatus, "missing", httpStatus,
 				"model_price_missing", "Successful response could not find model pricing.")
 			return
 		}
-		dispatchAmountCharge(ctx, config, consumer, modelName, price, metrics, httpStatus)
+		dispatchAmountCharge(ctx, config, consumer, modelName, price, metrics, httpStatus, requestStatus, errorCode, errorMessage)
 	})
 }
 
-func dispatchAmountCharge(ctx wrapper.HttpContext, config QuotaConfig, consumer string, modelName string, price modelPrice, metrics detailedUsageMetrics, httpStatus int) {
+func dispatchAmountCharge(
+	ctx wrapper.HttpContext,
+	config QuotaConfig,
+	consumer string,
+	modelName string,
+	price modelPrice,
+	metrics detailedUsageMetrics,
+	httpStatus int,
+	requestStatus string,
+	errorCode string,
+	errorMessage string,
+) {
 	cost := calculateAmountCost(metrics, price)
 	dispatchAmountEvent(ctx, config, amountEvent{
 		Consumer:                   consumer,
 		ModelName:                  modelName,
-		RequestStatus:              "success",
+		RequestStatus:              requestStatus,
 		UsageStatus:                "parsed",
+		ErrorCode:                  errorCode,
+		ErrorMessage:               errorMessage,
 		HTTPStatus:                 httpStatus,
 		InputToken:                 metrics.InputTokens,
 		OutputToken:                metrics.OutputTokens,
@@ -775,6 +856,7 @@ func dispatchAmountEvent(ctx wrapper.HttpContext, config QuotaConfig, event amou
 		monthlyTTL,
 	)
 	_ = config.redisClient.Eval(amountChargeScript, len(keys), keys, args, nil)
+	markAmountEventDispatched(ctx)
 }
 
 func buildAmountChargeArgs(cost int64, eventID, requestID, traceID, consumer, routeName, requestPath, requestKind, modelName, requestStatus, usageStatus string, httpStatus int, errorCode, errorMessage string, inputToken, outputToken, totalToken, cacheCreationInputToken, cacheCreation5mInputToken, cacheCreation1hInputToken, cacheReadInputToken, inputImageToken, outputImageToken, inputImageCount, outputImageCount, requestCount int64, cacheTTL, inputTokenDetailsJSON, outputTokenDetailsJSON, providerUsageJSON string, priceVersion int64, apiKeyID string, startedAt time.Time, finishedAt time.Time, occurredAt time.Time, dailyTTL int64, weeklyTTL int64, monthlyTTL int64) []interface{} {
@@ -824,34 +906,33 @@ func calculateAmountCost(metrics detailedUsageMetrics, price modelPrice) int64 {
 	inputContextTokens := metrics.InputTokens + maxInt64Value(metrics.CacheCreationInputTokens,
 		metrics.CacheCreation5mInputTokens+metrics.CacheCreation1hInputTokens) + metrics.CacheReadInputTokens + metrics.InputImageTokens
 	useAbove200k := inputContextTokens > 200_000
-	inputPer1K := choosePrice(useAbove200k, price.InputTokenPriceAbove200kPer1KMicroYuan, price.InputPer1K)
-	outputPer1K := choosePrice(useAbove200k, price.OutputTokenPriceAbove200kPer1KMicroYuan, price.OutputPer1K)
-	cacheCreationPer1K := choosePrice(useAbove200k, price.CacheCreationInputTokenPriceAbove200kPer1KMicroYuan,
-		price.CacheCreationInputTokenPricePer1KMicroYuan)
-	cacheReadPer1K := choosePrice(useAbove200k, price.CacheReadInputTokenPriceAbove200kPer1KMicroYuan,
-		price.CacheReadInputTokenPricePer1KMicroYuan)
-	cacheCreation1hPer1K := choosePrice(false, 0, price.CacheCreationInputTokenPriceAbove1hrPer1KMicroYuan)
-	if cacheCreation1hPer1K == 0 {
-		cacheCreation1hPer1K = cacheCreationPer1K
+	inputPerToken := choosePrice(useAbove200k, price.InputTokenPriceAbove200kMicroYuanPerToken, price.InputMicroYuanPerToken)
+	outputPerToken := choosePrice(useAbove200k, price.OutputTokenPriceAbove200kMicroYuanPerToken, price.OutputMicroYuanPerToken)
+	cacheCreationPerToken := choosePrice(useAbove200k, price.CacheCreationInputTokenPriceAbove200kMicroYuanPerToken,
+		price.CacheCreationInputTokenPriceMicroYuanPerToken)
+	cacheReadPerToken := choosePrice(useAbove200k, price.CacheReadInputTokenPriceAbove200kMicroYuanPerToken,
+		price.CacheReadInputTokenPriceMicroYuanPerToken)
+	cacheCreation1hPerToken := choosePrice(false, 0, price.CacheCreationInputTokenPriceAbove1hrMicroYuanPerToken)
+	if cacheCreation1hPerToken == 0 {
+		cacheCreation1hPerToken = cacheCreationPerToken
 	}
-	return roundTokenCost(metrics.InputTokens, inputPer1K) +
-		roundTokenCost(metrics.OutputTokens, outputPer1K) +
-		roundTokenCost(metrics.CacheCreation5mInputTokens, cacheCreationPer1K) +
-		roundTokenCost(metrics.CacheCreation1hInputTokens, cacheCreation1hPer1K) +
-		roundTokenCost(metrics.CacheReadInputTokens, cacheReadPer1K) +
-		roundTokenCost(metrics.InputImageTokens, price.InputImageTokenPricePer1KMicroYuan) +
-		roundTokenCost(metrics.OutputImageTokens, price.OutputImageTokenPricePer1KMicroYuan) +
+	return roundTokenCost(metrics.InputTokens, inputPerToken) +
+		roundTokenCost(metrics.OutputTokens, outputPerToken) +
+		roundTokenCost(metrics.CacheCreation5mInputTokens, cacheCreationPerToken) +
+		roundTokenCost(metrics.CacheCreation1hInputTokens, cacheCreation1hPerToken) +
+		roundTokenCost(metrics.CacheReadInputTokens, cacheReadPerToken) +
+		roundTokenCost(metrics.InputImageTokens, price.InputImageTokenPriceMicroYuanPerToken) +
+		roundTokenCost(metrics.OutputImageTokens, price.OutputImageTokenPriceMicroYuanPerToken) +
 		price.InputRequestPriceMicroYuan*maxInt64Value(metrics.RequestCount, 1) +
 		price.InputImagePriceMicroYuan*metrics.InputImageCount +
 		price.OutputImagePriceMicroYuan*metrics.OutputImageCount
 }
 
-func roundTokenCost(tokens int64, microPer1K int64) int64 {
-	if tokens <= 0 || microPer1K <= 0 {
+func roundTokenCost(tokens int64, microPerToken int64) int64 {
+	if tokens <= 0 || microPerToken <= 0 {
 		return 0
 	}
-	numerator := tokens * microPer1K
-	return (numerator + 500) / 1000
+	return tokens * microPerToken
 }
 
 func parseModelPriceResponse(modelName string, response resp.Value) (modelPrice, bool) {
@@ -866,11 +947,11 @@ func parseModelPriceResponse(modelName string, response resp.Value) (modelPrice,
 	for i := 0; i+1 < len(fields); i += 2 {
 		kv[fields[i].String()] = fields[i+1].String()
 	}
-	inputPer1K, err := strconv.ParseInt(strings.TrimSpace(kv["input_price_per_1k_micro_yuan"]), 10, 64)
+	inputPerToken, err := parseTokenPriceMicroYuanPerToken(kv, "input_price_micro_yuan_per_token", "input_price_per_1k_micro_yuan")
 	if err != nil {
 		return modelPrice{}, false
 	}
-	outputPer1K, err := strconv.ParseInt(strings.TrimSpace(kv["output_price_per_1k_micro_yuan"]), 10, 64)
+	outputPerToken, err := parseTokenPriceMicroYuanPerToken(kv, "output_price_micro_yuan_per_token", "output_price_per_1k_micro_yuan")
 	if err != nil {
 		return modelPrice{}, false
 	}
@@ -882,20 +963,20 @@ func parseModelPriceResponse(modelName string, response resp.Value) (modelPrice,
 	return modelPrice{
 		ModelID:                    modelID,
 		PriceVersion:               priceVersion,
-		InputPer1K:                 inputPer1K,
-		OutputPer1K:                outputPer1K,
+		InputMicroYuanPerToken:     inputPerToken,
+		OutputMicroYuanPerToken:    outputPerToken,
 		InputRequestPriceMicroYuan: parseInt64String(kv["input_request_price_micro_yuan"]),
-		CacheCreationInputTokenPricePer1KMicroYuan:          parseInt64String(kv["cache_creation_input_token_price_per_1k_micro_yuan"]),
-		CacheCreationInputTokenPriceAbove1hrPer1KMicroYuan:  parseInt64String(kv["cache_creation_input_token_price_above_1hr_per_1k_micro_yuan"]),
-		CacheReadInputTokenPricePer1KMicroYuan:              parseInt64String(kv["cache_read_input_token_price_per_1k_micro_yuan"]),
-		InputTokenPriceAbove200kPer1KMicroYuan:              parseInt64String(kv["input_token_price_above_200k_per_1k_micro_yuan"]),
-		OutputTokenPriceAbove200kPer1KMicroYuan:             parseInt64String(kv["output_token_price_above_200k_per_1k_micro_yuan"]),
-		CacheCreationInputTokenPriceAbove200kPer1KMicroYuan: parseInt64String(kv["cache_creation_input_token_price_above_200k_per_1k_micro_yuan"]),
-		CacheReadInputTokenPriceAbove200kPer1KMicroYuan:     parseInt64String(kv["cache_read_input_token_price_above_200k_per_1k_micro_yuan"]),
-		OutputImagePriceMicroYuan:                           parseInt64String(kv["output_image_price_micro_yuan"]),
-		OutputImageTokenPricePer1KMicroYuan:                 parseInt64String(kv["output_image_token_price_per_1k_micro_yuan"]),
-		InputImagePriceMicroYuan:                            parseInt64String(kv["input_image_price_micro_yuan"]),
-		InputImageTokenPricePer1KMicroYuan:                  parseInt64String(kv["input_image_token_price_per_1k_micro_yuan"]),
+		CacheCreationInputTokenPriceMicroYuanPerToken:          parseTokenPriceWithFallback(kv, "cache_creation_input_token_price_micro_yuan_per_token", "cache_creation_input_token_price_per_1k_micro_yuan"),
+		CacheCreationInputTokenPriceAbove1hrMicroYuanPerToken:  parseTokenPriceWithFallback(kv, "cache_creation_input_token_price_above_1hr_micro_yuan_per_token", "cache_creation_input_token_price_above_1hr_per_1k_micro_yuan"),
+		CacheReadInputTokenPriceMicroYuanPerToken:              parseTokenPriceWithFallback(kv, "cache_read_input_token_price_micro_yuan_per_token", "cache_read_input_token_price_per_1k_micro_yuan"),
+		InputTokenPriceAbove200kMicroYuanPerToken:              parseTokenPriceWithFallback(kv, "input_token_price_above_200k_micro_yuan_per_token", "input_token_price_above_200k_per_1k_micro_yuan"),
+		OutputTokenPriceAbove200kMicroYuanPerToken:             parseTokenPriceWithFallback(kv, "output_token_price_above_200k_micro_yuan_per_token", "output_token_price_above_200k_per_1k_micro_yuan"),
+		CacheCreationInputTokenPriceAbove200kMicroYuanPerToken: parseTokenPriceWithFallback(kv, "cache_creation_input_token_price_above_200k_micro_yuan_per_token", "cache_creation_input_token_price_above_200k_per_1k_micro_yuan"),
+		CacheReadInputTokenPriceAbove200kMicroYuanPerToken:     parseTokenPriceWithFallback(kv, "cache_read_input_token_price_above_200k_micro_yuan_per_token", "cache_read_input_token_price_above_200k_per_1k_micro_yuan"),
+		OutputImagePriceMicroYuan:                              parseInt64String(kv["output_image_price_micro_yuan"]),
+		OutputImageTokenPriceMicroYuanPerToken:                 parseTokenPriceWithFallback(kv, "output_image_token_price_micro_yuan_per_token", "output_image_token_price_per_1k_micro_yuan"),
+		InputImagePriceMicroYuan:                               parseInt64String(kv["input_image_price_micro_yuan"]),
+		InputImageTokenPriceMicroYuanPerToken:                  parseTokenPriceWithFallback(kv, "input_image_token_price_micro_yuan_per_token", "input_image_token_price_per_1k_micro_yuan"),
 	}, true
 }
 
@@ -917,6 +998,37 @@ func parseInt64String(value string) int64 {
 		return 0
 	}
 	return parsed
+}
+
+func parseNonNegativeInt64String(value string) (int64, error) {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return 0, strconv.ErrSyntax
+	}
+	parsed, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	if parsed < 0 {
+		return 0, strconv.ErrSyntax
+	}
+	return parsed, nil
+}
+
+func parseTokenPriceMicroYuanPerToken(kv map[string]string, modernKey string, legacyKey string) (int64, error) {
+	if value, err := parseNonNegativeInt64String(kv[modernKey]); err == nil {
+		return value, nil
+	}
+	legacy, err := parseNonNegativeInt64String(kv[legacyKey])
+	if err != nil {
+		return 0, err
+	}
+	return (legacy + 500) / 1000, nil
+}
+
+func parseTokenPriceWithFallback(kv map[string]string, modernKey string, legacyKey string) int64 {
+	value, _ := parseTokenPriceMicroYuanPerToken(kv, modernKey, legacyKey)
+	return value
 }
 
 func choosePrice(usePrimary bool, primary int64, fallback int64) int64 {
@@ -1015,6 +1127,16 @@ func getResponseStatusCode() int {
 		return http.StatusOK
 	}
 	return statusCode
+}
+
+func isAmountEventDispatched(ctx wrapper.HttpContext) bool {
+	value := ctx.GetContext(ctxKeyAmountEventDispatched)
+	dispatched, ok := value.(bool)
+	return ok && dispatched
+}
+
+func markAmountEventDispatched(ctx wrapper.HttpContext) {
+	ctx.SetContext(ctxKeyAmountEventDispatched, true)
 }
 
 func parseRFC3339Time(value string) time.Time {
@@ -1177,11 +1299,10 @@ if redis.call('SETNX', dedupKey, ARGV[2]) == 0 then
   return {0, redis.call('GET', balanceKey) or '0'}
 end
 redis.call('EXPIRE', dedupKey, 86400)
-local requestStatus = ARGV[10]
 local usageStatus = ARGV[11]
 local apiKeyId = ARGV[32]
 local nextBalance = redis.call('GET', balanceKey) or '0'
-if cost and cost > 0 and requestStatus == 'success' and usageStatus == 'parsed' then
+if cost and cost > 0 and usageStatus == 'parsed' then
   nextBalance = redis.call('DECRBY', balanceKey, cost)
   redis.call('INCRBY', userTotalKey, cost)
   redis.call('INCRBY', userDailyKey, cost)

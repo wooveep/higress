@@ -1,0 +1,44 @@
+{{- if and (eq .Values.gateway.kind "Deployment") .Values.gateway.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "gateway.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.gateway.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "gateway.selectorLabels" . | nindent 6 }}
+---
+{{- end }}
+{{- if .Values.controller.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "controller.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "controller.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.controller.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "controller.selectorLabels" . | nindent 6 }}
+---
+{{- end }}
+{{- if and .Values.global.enablePluginServer .Values.pluginServer.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "pluginServer.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "pluginServer.selectorLabels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.pluginServer.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "pluginServer.selectorLabels" . | nindent 6 }}
+{{- end }}

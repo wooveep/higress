@@ -24,7 +24,9 @@ spec:
       containers:
         - name: {{ .Chart.Name }}
           image: "{{ include "higress.image" (dict "repository" .Values.pluginServer.repository "hub" (.Values.pluginServer.hub | default .Values.global.hub) "image" (.Values.pluginServer.image | default "plugin-server") "tag" (.Values.pluginServer.tag | default "1.0.0")) }}"
-          {{- if .Values.global.imagePullPolicy }}
+          {{- if .Values.pluginServer.imagePullPolicy }}
+          imagePullPolicy: {{ .Values.pluginServer.imagePullPolicy }}
+          {{- else if .Values.global.imagePullPolicy }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
           {{- end }}
           ports:
@@ -36,4 +38,20 @@ spec:
             limits:
               cpu: {{ .Values.pluginServer.resources.limits.cpu }}
               memory: {{ .Values.pluginServer.resources.limits.memory }}
+      {{- with .Values.pluginServer.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.pluginServer.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.pluginServer.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.pluginServer.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
 {{- end }}

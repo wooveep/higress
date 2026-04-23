@@ -90,7 +90,7 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: wasmplugin-ai-proxy-doubao
+  name: wasmplugin-ai-proxy-volcengine
   namespace: higress-conformance-ai-backend
 spec:
   ingressClassName: higress
@@ -446,10 +446,10 @@ spec:
           apiTokens:
             - fake_token
           modelMapping:
-            "*": fake_doubao_endpoint
-          type: doubao
+            "*": fake_volcengine_endpoint
+          type: volcengine
       ingress:
-        - higress-conformance-ai-backend/wasmplugin-ai-proxy-doubao
+        - higress-conformance-ai-backend/wasmplugin-ai-proxy-volcengine
     - config:
         provider:
           apiTokens:

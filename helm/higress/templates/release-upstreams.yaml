@@ -1,0 +1,77 @@
+{{- $release := .Values.release | default dict }}
+{{- $upstreams := get $release "upstreams" | default list }}
+{{- range $index, $upstream := $upstreams }}
+{{- $name := $upstream.name | default (printf "release-upstream-%d" $index) }}
+{{- $host := $upstream.host | default (printf "%s.%s.svc.cluster.local" $upstream.serviceName $upstream.serviceNamespace) }}
+{{- $port := $upstream.port | default 80 }}
+{{- if eq ($upstream.targetType | default "k8sService") "external" }}
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+spec:
+  hosts:
+    - {{ $host | quote }}
+  location: MESH_EXTERNAL
+  resolution: {{ if $upstream.endpoints }}STATIC{{ else }}DNS{{ end }}
+  ports:
+    - number: {{ $port }}
+      name: {{ ($upstream.protocol | default "HTTP") | lower }}-{{ $port }}
+      protocol: {{ $upstream.protocol | default "HTTP" }}
+  {{- if $upstream.endpoints }}
+  endpoints:
+    {{- range $endpoint := $upstream.endpoints }}
+    - address: {{ $endpoint.address | quote }}
+      {{- if $endpoint.ports }}
+      ports:
+        {{- range $portName, $portValue := $endpoint.ports }}
+        {{ $portName }}: {{ $portValue | quote }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+  {{- end }}
+---
+{{- end }}
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+spec:
+  host: {{ $host | quote }}
+  trafficPolicy:
+    loadBalancer:
+      {{- $mode := $upstream.loadBalancer.mode | default "consistentHash" }}
+      {{- if eq $mode "roundRobin" }}
+      simple: ROUND_ROBIN
+      {{- else if eq $mode "leastRequest" }}
+      simple: LEAST_REQUEST
+      {{- else }}
+      consistentHash:
+        {{- if eq ($upstream.loadBalancer.key | default "sourceIp") "header" }}
+        httpHeaderName: {{ $upstream.loadBalancer.headerName | default "x-user-id" | quote }}
+        {{- else if eq ($upstream.loadBalancer.key | default "sourceIp") "cookie" }}
+        httpCookie:
+          name: {{ $upstream.loadBalancer.cookieName | default "aigateway-upstream" | quote }}
+          ttl: {{ $upstream.loadBalancer.cookieTTL | default "0s" | quote }}
+        {{- else }}
+        useSourceIp: true
+        {{- end }}
+      {{- end }}
+    {{- with $upstream.connectionPool }}
+    connectionPool:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with $upstream.outlierDetection }}
+    outlierDetection:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+  {{- with $upstream.subsets }}
+  subsets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- if lt (add1 $index) (len $upstreams) }}
+---
+{{- end }}
+{{- end }}

@@ -30,6 +30,7 @@ const (
 	qwenCompatibleChatCompletionPath      = "/compatible-mode/v1/chat/completions"
 	qwenCompatibleCompletionsPath         = "/compatible-mode/v1/completions"
 	qwenCompatibleTextEmbeddingPath       = "/compatible-mode/v1/embeddings"
+	qwenCompatibleResponsesPath           = "/api/v2/apps/protocols/compatible-mode/v1/responses"
 	qwenCompatibleFilesPath               = "/compatible-mode/v1/files"
 	qwenCompatibleRetrieveFilePath        = "/compatible-mode/v1/files/{file_id}"
 	qwenCompatibleRetrieveFileContentPath = "/compatible-mode/v1/files/{file_id}/content"
@@ -68,7 +69,9 @@ func (m *qwenProviderInitializer) DefaultCapabilities(qwenEnableCompatible bool)
 		return map[string]string{
 			string(ApiNameChatCompletion):      qwenCompatibleChatCompletionPath,
 			string(ApiNameEmbeddings):          qwenCompatibleTextEmbeddingPath,
+			string(ApiNameImageGeneration):     qwenMultimodalGenerationPath,
 			string(ApiNameCompletion):          qwenCompatibleCompletionsPath,
+			string(ApiNameResponses):           qwenCompatibleResponsesPath,
 			string(ApiNameFiles):               qwenCompatibleFilesPath,
 			string(ApiNameRetrieveFile):        qwenCompatibleRetrieveFilePath,
 			string(ApiNameRetrieveFileContent): qwenCompatibleRetrieveFileContentPath,
@@ -83,6 +86,7 @@ func (m *qwenProviderInitializer) DefaultCapabilities(qwenEnableCompatible bool)
 		return map[string]string{
 			string(ApiNameChatCompletion):    qwenChatCompletionPath,
 			string(ApiNameEmbeddings):        qwenTextEmbeddingPath,
+			string(ApiNameImageGeneration):   qwenMultimodalGenerationPath,
 			string(ApiNameQwenAsyncAIGC):     qwenAsyncAIGCPath,
 			string(ApiNameQwenAsyncTask):     qwenAsyncTaskPath,
 			string(ApiNameQwenV1Rerank):      qwenTextRerankPath,
@@ -118,7 +122,7 @@ func (m *qwenProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName 
 }
 
 func (m *qwenProvider) TransformRequestBodyHeaders(ctx wrapper.HttpContext, apiName ApiName, body []byte, headers http.Header) ([]byte, error) {
-	if m.config.qwenEnableCompatible {
+	if m.config.qwenEnableCompatible && apiName != ApiNameImageGeneration {
 		if gjson.GetBytes(body, "model").Exists() {
 			rawModel := gjson.GetBytes(body, "model").String()
 			mappedModel := getMappedModel(rawModel, m.config.modelMapping)
@@ -136,6 +140,8 @@ func (m *qwenProvider) TransformRequestBodyHeaders(ctx wrapper.HttpContext, apiN
 		return m.onChatCompletionRequestBody(ctx, body, headers)
 	case ApiNameEmbeddings:
 		return m.onEmbeddingsRequestBody(ctx, body)
+	case ApiNameImageGeneration:
+		return m.onImageGenerationRequestBody(ctx, body, headers)
 	default:
 		return m.config.defaultTransformRequestBody(ctx, apiName, body)
 	}
@@ -200,6 +206,36 @@ func (m *qwenProvider) onEmbeddingsRequestBody(ctx wrapper.HttpContext, body []b
 	return json.Marshal(qwenRequest)
 }
 
+func (m *qwenProvider) onImageGenerationRequestBody(ctx wrapper.HttpContext, body []byte, headers http.Header) ([]byte, error) {
+	request := &imageGenerationRequest{}
+	if err := m.config.parseRequestAndMapModel(ctx, request, body); err != nil {
+		return nil, err
+	}
+
+	headers.Set("Accept", "*/*")
+	headers.Del("X-DashScope-SSE")
+
+	qwenRequest := &qwenImageGenerationRequest{
+		Model: request.Model,
+		Input: qwenTextGenInput{
+			Messages: []qwenMessage{
+				{
+					Role: roleUser,
+					Content: []qwenVlMessageContent{
+						{Text: request.Prompt},
+					},
+				},
+			},
+		},
+		Parameters: qwenImageGenerationParameters{
+			N:    request.N,
+			Size: normalizeQwenImageSize(request.Size),
+		},
+	}
+
+	return json.Marshal(qwenRequest)
+}
+
 func (m *qwenProvider) OnStreamingEvent(ctx wrapper.HttpContext, name ApiName, event StreamEvent) ([]StreamEvent, error) {
 	if m.config.qwenEnableCompatible || name != ApiNameChatCompletion {
 		return nil, nil
@@ -229,6 +265,9 @@ func (m *qwenProvider) OnStreamingEvent(ctx wrapper.HttpContext, name ApiName, e
 }
 
 func (m *qwenProvider) TransformResponseBody(ctx wrapper.HttpContext, apiName ApiName, body []byte) ([]byte, error) {
+	if apiName == ApiNameImageGeneration {
+		return m.onImageGenerationResponseBody(body)
+	}
 	if m.config.qwenEnableCompatible {
 		return body, nil
 	}
@@ -259,6 +298,15 @@ func (m *qwenProvider) onEmbeddingsResponseBody(ctx wrapper.HttpContext, body []
 		return nil, fmt.Errorf("unable to unmarshal Qwen response: %v", err)
 	}
 	response := m.buildEmbeddingsResponse(ctx, qwenResponse)
+	return json.Marshal(response)
+}
+
+func (m *qwenProvider) onImageGenerationResponseBody(body []byte) ([]byte, error) {
+	qwenResponse := &qwenImageGenerationResponse{}
+	if err := json.Unmarshal(body, qwenResponse); err != nil {
+		return nil, fmt.Errorf("unable to unmarshal Qwen image generation response: %v", err)
+	}
+	response := m.buildImageGenerationResponse(qwenResponse)
 	return json.Marshal(response)
 }
 
@@ -541,10 +589,35 @@ func (m *qwenProvider) buildEmbeddingsResponse(ctx wrapper.HttpContext, qwenResp
 	}
 }
 
+func (m *qwenProvider) buildImageGenerationResponse(qwenResponse *qwenImageGenerationResponse) *imageGenerationResponse {
+	data := make([]imageGenerationData, 0)
+	for _, choice := range qwenResponse.Output.Choices {
+		for _, content := range choice.Message.Content {
+			if content.Image == "" {
+				continue
+			}
+			data = append(data, imageGenerationData{
+				URL: content.Image,
+			})
+		}
+	}
+
+	return &imageGenerationResponse{
+		Created: time.Now().UnixMilli() / 1000,
+		Data:    data,
+	}
+}
+
 type qwenTextGenRequest struct {
 	Model      string                `json:"model"`
 	Input      qwenTextGenInput      `json:"input"`
 	Parameters qwenTextGenParameters `json:"parameters,omitempty"`
+}
+
+type qwenImageGenerationRequest struct {
+	Model      string                        `json:"model"`
+	Input      qwenTextGenInput              `json:"input"`
+	Parameters qwenImageGenerationParameters `json:"parameters,omitempty"`
 }
 
 type qwenTextGenInput struct {
@@ -564,10 +637,20 @@ type qwenTextGenParameters struct {
 	Tools             []tool  `json:"tools,omitempty"`
 }
 
+type qwenImageGenerationParameters struct {
+	N    int    `json:"n,omitempty"`
+	Size string `json:"size,omitempty"`
+}
+
 type qwenTextGenResponse struct {
 	RequestId string            `json:"request_id"`
 	Output    qwenTextGenOutput `json:"output"`
 	Usage     qwenUsage         `json:"usage"`
+}
+
+type qwenImageGenerationResponse struct {
+	RequestId string                    `json:"request_id"`
+	Output    qwenImageGenerationOutput `json:"output"`
 }
 
 type qwenTextGenOutput struct {
@@ -575,9 +658,23 @@ type qwenTextGenOutput struct {
 	Choices      []qwenTextGenChoice `json:"choices"`
 }
 
+type qwenImageGenerationOutput struct {
+	Choices []qwenImageGenerationChoice `json:"choices"`
+}
+
 type qwenTextGenChoice struct {
 	FinishReason string      `json:"finish_reason"`
 	Message      qwenMessage `json:"message"`
+}
+
+type qwenImageGenerationChoice struct {
+	FinishReason string                     `json:"finish_reason"`
+	Message      qwenImageGenerationMessage `json:"message"`
+}
+
+type qwenImageGenerationMessage struct {
+	Role    string                 `json:"role"`
+	Content []qwenVlMessageContent `json:"content"`
 }
 
 type qwenUsage struct {
@@ -707,6 +804,8 @@ func (m *qwenProvider) GetApiName(path string) ApiName {
 	case strings.Contains(path, qwenTextEmbeddingPath),
 		strings.Contains(path, qwenCompatibleTextEmbeddingPath):
 		return ApiNameEmbeddings
+	case strings.Contains(path, qwenCompatibleResponsesPath):
+		return ApiNameResponses
 	case strings.Contains(path, qwenAsyncAIGCPath):
 		return ApiNameQwenAsyncAIGC
 	case strings.Contains(path, qwenAsyncTaskPath):
@@ -716,4 +815,11 @@ func (m *qwenProvider) GetApiName(path string) ApiName {
 	default:
 		return ""
 	}
+}
+
+func normalizeQwenImageSize(size string) string {
+	if size == "" {
+		return ""
+	}
+	return strings.ReplaceAll(strings.ToLower(size), "x", "*")
 }

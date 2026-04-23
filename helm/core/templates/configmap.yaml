@@ -3,7 +3,7 @@
     # Refer to https://github.com/spiffe/spiffe/blob/master/standards/SPIFFE-ID.md#21-trust-domain
     trustDomain: "cluster.local"
     accessLogEncoding: TEXT
-    {{- if .Values.global.o11y.enabled }}
+    {{- if and .Values.global.o11y.enabled .Values.global.o11y.promtail.enabled }}
     accessLogFile: "/var/log/proxy/access.log"
     {{- else }}
     accessLogFile: "/dev/stdout"
@@ -123,7 +123,21 @@ data:
     {{- if and .Values.global.enableRedis (kindIs "map" $mcpServerData) }}
     {{- $redisConfig := get $mcpServerData "redis" | default dict }}
     {{- if empty (get $redisConfig "address") }}
-    {{- $_ := set $redisConfig "address" (printf "%s.%s.svc.%s:%v" (.Values.redis.redis.name | default "redis-stack-server") .Release.Namespace (.Values.global.proxy.clusterDomain | default "cluster.local") (.Values.redis.redis.service.port | default 6379)) }}
+    {{- $redisServiceName := .Values.redis.serviceNameOverride | default "" }}
+    {{- if eq $redisServiceName "" }}
+    {{- if .Values.redis.sentinel.masterService.enabled }}
+    {{- $redisServiceName = printf "%s-master" (.Values.redis.fullnameOverride | default "redis-server") }}
+    {{- else }}
+    {{- $redisServiceName = .Values.redis.fullnameOverride | default "redis-server" }}
+    {{- end }}
+    {{- end }}
+    {{- $_ := set $redisConfig "address" (printf "%s.%s.svc.%s:%v" $redisServiceName .Release.Namespace (.Values.global.proxy.clusterDomain | default "cluster.local") (.Values.redis.sentinel.masterService.ports.redis | default 6379)) }}
+    {{- end }}
+    {{- if empty (get $redisConfig "password") }}
+    {{- $redisPassword := .Values.redis.auth.password | default "" }}
+    {{- if not (empty $redisPassword) }}
+    {{- $_ := set $redisConfig "password" $redisPassword }}
+    {{- end }}
     {{- end }}
     {{- $_ := set $mcpServerData "redis" $redisConfig }}
     {{- end }}

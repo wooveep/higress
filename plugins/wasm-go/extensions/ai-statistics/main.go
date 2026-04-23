@@ -65,6 +65,7 @@ const (
 	// AI API Paths
 	PathOpenAIChatCompletions       = "/v1/chat/completions"
 	PathOpenAICompletions           = "/v1/completions"
+	PathOpenAIImageGenerations      = "/v1/images/generations"
 	PathOpenAIEmbeddings            = "/v1/embeddings"
 	PathOpenAIModels                = "/v1/models"
 	PathGeminiGenerateContent       = "/generateContent"
@@ -88,12 +89,12 @@ const (
 	ChatRound              = "chat_round"
 
 	// Inner span attributes
-	ArmsSpanKind     = "gen_ai.span.kind"
-	ArmsModelName    = "gen_ai.model_name"
-	ArmsRequestModel = "gen_ai.request.model"
-	ArmsInputToken   = "gen_ai.usage.input_tokens"
-	ArmsOutputToken  = "gen_ai.usage.output_tokens"
-	ArmsTotalToken   = "gen_ai.usage.total_tokens"
+	ArmsSpanKind                  = "gen_ai.span.kind"
+	ArmsModelName                 = "gen_ai.model_name"
+	ArmsRequestModel              = "gen_ai.request.model"
+	ArmsInputToken                = "gen_ai.usage.input_tokens"
+	ArmsOutputToken               = "gen_ai.usage.output_tokens"
+	ArmsTotalToken                = "gen_ai.usage.total_tokens"
 	ArmsCacheCreationInputToken   = "gen_ai.usage.cache_creation_input_tokens"
 	ArmsCacheCreation5mInputToken = "gen_ai.usage.cache_creation_5m_input_tokens"
 	ArmsCacheCreation1hInputToken = "gen_ai.usage.cache_creation_1h_input_tokens"
@@ -142,13 +143,13 @@ const (
 	ToolCallsPathStreaming    = "choices.0.delta.tool_calls"
 
 	// Claude/Anthropic tool calls paths (streaming)
-	ClaudeEventType              = "type"
-	ClaudeContentBlockType       = "content_block.type"
-	ClaudeContentBlockID         = "content_block.id"
-	ClaudeContentBlockName       = "content_block.name"
-	ClaudeContentBlockInput      = "content_block.input"
-	ClaudeDeltaPartialJSON       = "delta.partial_json"
-	ClaudeIndex                  = "index"
+	ClaudeEventType         = "type"
+	ClaudeContentBlockType  = "content_block.type"
+	ClaudeContentBlockID    = "content_block.id"
+	ClaudeContentBlockName  = "content_block.name"
+	ClaudeContentBlockInput = "content_block.input"
+	ClaudeDeltaPartialJSON  = "delta.partial_json"
+	ClaudeIndex             = "index"
 
 	// Reasoning paths
 	ReasoningPathNonStreaming = "choices.0.message.reasoning_content"
@@ -164,10 +165,10 @@ func getDefaultAttributes() []Attribute {
 	return []Attribute{
 		// Extract complete conversation history from request body
 		{
-			Key:        "messages",
+			Key:         "messages",
 			ValueSource: RequestBody,
-			Value:      "messages",
-			ApplyToLog: true,
+			Value:       "messages",
+			ApplyToLog:  true,
 		},
 		// Built-in attributes (no value_source needed, will be auto-extracted)
 		{
@@ -269,10 +270,10 @@ func extractSessionId(customHeader string) string {
 
 // ToolCall represents a single tool call in the response
 type ToolCall struct {
-	Index    int                    `json:"index,omitempty"`
-	ID       string                 `json:"id,omitempty"`
-	Type     string                 `json:"type,omitempty"`
-	Function ToolCallFunction       `json:"function,omitempty"`
+	Index    int              `json:"index,omitempty"`
+	ID       string           `json:"id,omitempty"`
+	Type     string           `json:"type,omitempty"`
+	Function ToolCallFunction `json:"function,omitempty"`
 }
 
 // ToolCallFunction represents the function details in a tool call
@@ -307,7 +308,7 @@ func extractStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuffer) *S
 
 		for _, tcResult := range toolCallsResult.Array() {
 			index := int(tcResult.Get("index").Int())
-			
+
 			// Get or create tool call entry
 			tc, exists := buffer.ToolCalls[index]
 			if !exists {
@@ -360,10 +361,10 @@ func extractClaudeStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuff
 			contentBlockType := gjson.GetBytes(chunk, ClaudeContentBlockType)
 			if contentBlockType.Exists() && contentBlockType.String() == "tool_use" {
 				index := int(gjson.GetBytes(chunk, ClaudeIndex).Int())
-				
+
 				// Create tool call entry
 				tc := &ToolCall{Index: index}
-				
+
 				// Extract id and name
 				if id := gjson.GetBytes(chunk, ClaudeContentBlockID).String(); id != "" {
 					tc.ID = id
@@ -372,11 +373,11 @@ func extractClaudeStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuff
 					tc.Function.Name = name
 				}
 				tc.Type = "tool_use"
-				
+
 				buffer.ToolCalls[index] = tc
 				buffer.InToolBlock[index] = true
 				buffer.ArgumentsBuffer[index] = ""
-				
+
 				// Try to extract initial input if present
 				if input := gjson.GetBytes(chunk, ClaudeContentBlockInput); input.Exists() {
 					if inputMap, ok := input.Value().(map[string]interface{}); ok {
@@ -403,7 +404,7 @@ func extractClaudeStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuff
 			index := int(gjson.GetBytes(chunk, ClaudeIndex).Int())
 			if buffer.InToolBlock[index] {
 				buffer.InToolBlock[index] = false
-				
+
 				// Parse accumulated arguments and set them
 				if tc, exists := buffer.ToolCalls[index]; exists {
 					tc.Function.Arguments = buffer.ArgumentsBuffer[index]
@@ -565,7 +566,7 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 	if configJson.Get("value_length_limit").Exists() {
 		config.valueLengthLimit = int(configJson.Get("value_length_limit").Int())
 	} else {
-		config.valueLengthLimit = 4000
+		config.valueLengthLimit = 32000
 	}
 
 	// Parse attributes or use defaults
@@ -636,8 +637,8 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 
 	// If use_default_attributes or use_default_response_attributes is enabled and enable_path_suffixes is not configured, use default path suffixes
 	if (useDefaultAttributes || useDefaultResponseAttributes) && !configJson.Get("enable_path_suffixes").Exists() {
-		config.enablePathSuffixes = []string{"/completions", "/messages"}
-		log.Infof("Using default path suffixes: /completions, /messages")
+		config.enablePathSuffixes = []string{"/completions", "/messages", "/images/generations"}
+		log.Infof("Using default path suffixes: /completions, /messages, /images/generations")
 	} else {
 		// Process manually configured path suffixes
 		for _, suffix := range pathSuffixes {
@@ -856,7 +857,7 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 			setSpanAttribute(ArmsModelName, usage.Model)
 			setSpanAttribute(ArmsInputToken, usage.InputToken)
 			setSpanAttribute(ArmsOutputToken, usage.OutputToken)
-			
+
 			// Set token details to context for later use in attributes
 			if len(usage.InputTokenDetails) > 0 {
 				ctx.SetContext(tokenusage.CtxKeyInputTokenDetails, usage.InputTokenDetails)
@@ -864,6 +865,9 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 			if len(usage.OutputTokenDetails) > 0 {
 				ctx.SetContext(tokenusage.CtxKeyOutputTokenDetails, usage.OutputTokenDetails)
 			}
+
+			// Write once
+			_ = ctx.WriteUserAttributeToLogWithKey(wrapper.AILogKey)
 		}
 		applyDetailedUsageAttributes(ctx, mergeDetailedUsageFromResponse(ctx, data))
 	}
@@ -921,7 +925,7 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
 			setSpanAttribute(ArmsInputToken, usage.InputToken)
 			setSpanAttribute(ArmsOutputToken, usage.OutputToken)
 			setSpanAttribute(ArmsTotalToken, usage.TotalToken)
-			
+
 			// Set token details to context for later use in attributes
 			if len(usage.InputTokenDetails) > 0 {
 				ctx.SetContext(tokenusage.CtxKeyInputTokenDetails, usage.InputTokenDetails)
@@ -990,7 +994,7 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 		if (value == nil || value == "") && attribute.DefaultValue != "" {
 			value = attribute.DefaultValue
 		}
-		
+
 		// Format value for logging/span
 		var formattedValue interface{}
 		switch v := value.(type) {
@@ -1009,7 +1013,7 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 				formattedValue = fmt.Sprint(value)[:config.valueLengthLimit/2] + " [truncated] " + fmt.Sprint(value)[len(fmt.Sprint(value))-config.valueLengthLimit/2:]
 			}
 		}
-		
+
 		log.Debugf("[attribute] source type: %s, key: %s, value: %+v", source, key, formattedValue)
 		if attribute.ApplyToLog {
 			if attribute.AsSeparateLogField {
@@ -1139,7 +1143,7 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 			// Also try Claude format (both formats can be checked)
 			buffer = extractClaudeStreamingToolCalls(body, buffer)
 			ctx.SetContext(CtxStreamingToolCallsBuffer, buffer)
-			
+
 			// Also set tool_calls to user attributes so they appear in ai_log
 			toolCalls := getToolCallsFromBuffer(buffer)
 			if len(toolCalls) > 0 {
@@ -1424,10 +1428,6 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 		return
 	}
 
-	if ctx.GetUserAttribute(tokenusage.CtxKeyModel) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyInputToken) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyOutputToken) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyTotalToken) == nil {
-		log.Info("get usage information failed, skip metric record")
-		return
-	}
 	model, ok = ctx.GetUserAttribute(tokenusage.CtxKeyModel).(string)
 	if !ok {
 		log.Info("Model type assert failed, skip metric record")
@@ -1436,17 +1436,17 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	if inputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyInputToken)); ok {
 		config.incrementCounter(generateMetricName(route, cluster, model, consumer, tokenusage.CtxKeyInputToken), inputToken)
 	} else {
-		log.Info("InputToken type assert failed, skip metric record")
+		log.Debug("InputToken missing, skip token counter")
 	}
 	if outputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyOutputToken)); ok {
 		config.incrementCounter(generateMetricName(route, cluster, model, consumer, tokenusage.CtxKeyOutputToken), outputToken)
 	} else {
-		log.Info("OutputToken type assert failed, skip metric record")
+		log.Debug("OutputToken missing, skip token counter")
 	}
 	if totalToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyTotalToken)); ok {
 		config.incrementCounter(generateMetricName(route, cluster, model, consumer, tokenusage.CtxKeyTotalToken), totalToken)
 	} else {
-		log.Info("TotalToken type assert failed, skip metric record")
+		log.Debug("TotalToken missing, skip token counter")
 	}
 	incrementOptionalMetric(ctx, config, route, cluster, model, consumer, "cache_creation_input_token")
 	incrementOptionalMetric(ctx, config, route, cluster, model, consumer, "cache_creation_5m_input_token")

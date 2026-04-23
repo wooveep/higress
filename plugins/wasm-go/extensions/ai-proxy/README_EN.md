@@ -759,17 +759,17 @@ providers:
 }
 ```
 
-### Using OpenAI Protocol Proxy for Doubao Service
+### Using OpenAI Protocol Proxy for Volcengine Ark Service
 
 ```yaml
-activeProviderId: my-doubao
+activeProviderId: my-volcengine
 providers:
-- id: my-doubao
-  type: doubao
+- id: my-volcengine
+  type: volcengine
   apiTokens:
-    - YOUR_DOUBAO_API_KEY
+    - YOUR_ARK_API_KEY
   modelMapping:
-    '*': YOUR_DOUBAO_ENDPOINT
+    '*': YOUR_ARK_ENDPOINT
   timeout: 1200000
 ```
 
