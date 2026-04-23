@@ -1,5 +1,11 @@
 out
 *.out
+.logs/
+logs/
+*.log
+*.log.*
+tmp/
+.tmp/
 *.tgz
 *.wasm
 .DS_Store

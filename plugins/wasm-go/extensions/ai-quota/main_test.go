@@ -565,6 +565,13 @@ func TestGetOperationMode(t *testing.T) {
 			chatMode:  ChatModeNone,
 			adminMode: AdminModeNone,
 		},
+		{
+			name:      "image generation mode",
+			path:      "/v1/images/generations",
+			adminPath: "/quota",
+			chatMode:  ChatModeCompletion,
+			adminMode: AdminModeNone,
+		},
 	}
 
 	for _, tt := range tests {
@@ -574,6 +581,12 @@ func TestGetOperationMode(t *testing.T) {
 			require.Equal(t, tt.adminMode, adminMode)
 		})
 	}
+}
+
+func TestRequestKindFromPath(t *testing.T) {
+	require.Equal(t, "images.generations", requestKindFromPath("/v1/images/generations"))
+	require.Equal(t, "chat.completions", requestKindFromPath("/v1/chat/completions"))
+	require.Equal(t, "unknown", requestKindFromPath("/other/path"))
 }
 
 func TestBuildAmountChargeArgs(t *testing.T) {

@@ -820,17 +820,17 @@ provider:
 }
 ```
 
-### 使用 OpenAI 协议代理豆包大模型服务
+### 使用 OpenAI 协议代理火山引擎方舟大模型服务
 
 **配置信息**
 
 ```yaml
 provider:
-  type: doubao
+  type: volcengine
   apiTokens:
-    - YOUR_DOUBAO_API_KEY
+    - YOUR_ARK_API_KEY
   modelMapping:
-    '*': YOUR_DOUBAO_ENDPOINT
+    '*': YOUR_ARK_ENDPOINT
   timeout: 1200000
 ```
 

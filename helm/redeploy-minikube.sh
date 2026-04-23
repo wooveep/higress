@@ -4,8 +4,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
-# Prefer the chart colocated with this script (higress/helm/higress).
-# Fall back to the legacy monorepo-level helm path when needed.
+source "${ROOT_DIR}/scripts/dev-shell-lib.sh"
+
 LOCAL_CHART_DIR="${SCRIPT_DIR}/higress"
 LEGACY_CHART_DIR="${ROOT_DIR}/helm/higress"
 if [[ -d "${LOCAL_CHART_DIR}" ]]; then
@@ -13,10 +13,8 @@ if [[ -d "${LOCAL_CHART_DIR}" ]]; then
 else
   DEFAULT_CHART_DIR="${LEGACY_CHART_DIR}"
 fi
+
 CHART_DIR="${CHART_DIR:-${DEFAULT_CHART_DIR}}"
-if [[ -d "${CHART_DIR}" ]]; then
-  CHART_DIR="$(cd -- "${CHART_DIR}" && pwd -P)"
-fi
 VALUES_FILE="${VALUES_FILE:-${CHART_DIR}/values-local-minikube.yaml}"
 NAMESPACE="${NAMESPACE:-aigateway-system}"
 RELEASE_NAME="${RELEASE_NAME:-aigateway}"
@@ -28,13 +26,16 @@ SKIP_BUILD=false
 SKIP_LOAD=false
 SKIP_DEPLOY=false
 
+declare -a VALUES_FILES=()
+
 usage() {
-  cat <<'USAGE'
+  cat <<'EOF'
 Usage:
   redeploy-minikube.sh [options]
 
 Options:
-  --values <path>         Helm values file (default: higress/helm/higress/values-local-minikube.yaml)
+  --values <path>         Primary Helm values file
+  --extra-values <path>   Additional Helm values file, applied in order
   --namespace <name>      Kubernetes namespace (default: aigateway-system)
   --release <name>        Helm release name (default: aigateway)
   --components <list>     Components passed to build-local-images.sh
@@ -44,16 +45,17 @@ Options:
   --skip-load             Skip minikube image load
   --skip-deploy           Skip helm upgrade + rollout restart
   -h, --help              Show this help
-
-Environment overrides:
-  CHART_DIR, VALUES_FILE, NAMESPACE, RELEASE_NAME, BUILD_COMPONENTS, HELM_TIMEOUT, MINIKUBE_PROFILE
-USAGE
+EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --values)
       VALUES_FILE="$2"
+      shift 2
+      ;;
+    --extra-values)
+      VALUES_FILES+=("$2")
       shift 2
       ;;
     --namespace)
@@ -93,38 +95,28 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     *)
-      echo "Unknown argument: $1" >&2
-      usage >&2
-      exit 1
+      dev_die "Unknown argument: $1"
       ;;
   esac
 done
 
-need_cmd() {
-  if ! command -v "$1" >/dev/null 2>&1; then
-    echo "Missing required command: $1" >&2
-    exit 1
-  fi
-}
+[[ -d "${CHART_DIR}" ]] || dev_die "Chart directory not found: ${CHART_DIR}"
+CHART_DIR="$(cd -- "${CHART_DIR}" && pwd -P)"
 
-need_cmd docker
-need_cmd helm
-need_cmd kubectl
-need_cmd minikube
-need_cmd python3
+VALUES_FILE="$(cd -- "$(dirname -- "${VALUES_FILE}")" 2>/dev/null && pwd -P)/$(basename "${VALUES_FILE}")"
+[[ -f "${VALUES_FILE}" ]] || dev_die "Values file not found: ${VALUES_FILE}"
 
-if [[ ! -f "${VALUES_FILE}" ]]; then
-  echo "Values file not found: ${VALUES_FILE}" >&2
-  exit 1
-fi
+FINAL_VALUES_FILES=("${VALUES_FILE}")
+for extra_file in "${VALUES_FILES[@]}"; do
+  extra_file="$(cd -- "$(dirname -- "${extra_file}")" 2>/dev/null && pwd -P)/$(basename "${extra_file}")"
+  [[ -f "${extra_file}" ]] || dev_die "Values file not found: ${extra_file}"
+  FINAL_VALUES_FILES+=("${extra_file}")
+done
 
-if [[ ! -d "${CHART_DIR}" ]]; then
-  echo "Chart directory not found: ${CHART_DIR}" >&2
-  exit 1
-fi
-
-echo "Using chart dir  : ${CHART_DIR}"
-echo "Using values file: ${VALUES_FILE}"
+dev_need_cmd docker
+dev_need_cmd helm
+dev_need_cmd kubectl
+dev_need_cmd minikube
 
 MINIKUBE_ARGS=()
 if [[ -n "${MINIKUBE_PROFILE}" ]]; then
@@ -136,6 +128,14 @@ declare -A FALLBACK_IMAGE_REPO=(
   ["aigateway/prometheus"]="prom/prometheus"
   ["aigateway/loki"]="grafana/loki"
   ["aigateway/promtail"]="grafana/promtail"
+  ["bitnamilegacy/redis"]="bitnamilegacy/redis"
+  ["bitnamilegacy/redis-sentinel"]="bitnamilegacy/redis-sentinel"
+  ["bitnamilegacy/postgresql-repmgr"]="bitnamilegacy/postgresql-repmgr"
+  ["bitnamilegacy/pgpool"]="bitnamilegacy/pgpool"
+  ["bitnami/redis"]="bitnami/redis"
+  ["bitnami/redis-sentinel"]="bitnami/redis-sentinel"
+  ["bitnami/postgresql-repmgr"]="bitnami/postgresql-repmgr"
+  ["bitnami/pgpool"]="bitnami/pgpool"
 )
 
 run() {
@@ -145,83 +145,69 @@ run() {
 
 force_remove_minikube_image() {
   local image="$1"
-  local cleanup_cmd
+  local quoted cleanup_cmd
 
-  cleanup_cmd=$(
-    python3 - "${image}" <<'PY'
-import shlex
-import sys
-
-image = sys.argv[1]
-quoted = shlex.quote(image)
-
-print(
-    "if command -v docker >/dev/null 2>&1; then "
-    f"docker image rm -f {quoted} >/dev/null 2>&1 || true; "
-    "elif command -v nerdctl >/dev/null 2>&1; then "
-    f"nerdctl --namespace k8s.io image rm -f {quoted} >/dev/null 2>&1 || true; "
-    "elif command -v crictl >/dev/null 2>&1; then "
-    f"crictl rmi {quoted} >/dev/null 2>&1 || true; "
-    "fi"
-)
-PY
-  )
-
+  quoted="$(printf '%q' "${image}")"
+  cleanup_cmd="if command -v docker >/dev/null 2>&1; then docker image rm -f ${quoted} >/dev/null 2>&1 || true; elif command -v nerdctl >/dev/null 2>&1; then nerdctl --namespace k8s.io image rm -f ${quoted} >/dev/null 2>&1 || true; elif command -v crictl >/dev/null 2>&1; then crictl rmi ${quoted} >/dev/null 2>&1 || true; fi"
   run minikube "${MINIKUBE_ARGS[@]}" ssh -- "${cleanup_cmd}"
 }
 
+resolve_value() {
+  local path="$1"
+  yaml_get_scalar_from_files "${path}" "${FINAL_VALUES_FILES[@]}"
+}
+
+value_is_true() {
+  local value
+  value="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  [[ "${value}" == "true" || "${value}" == "yes" || "${value}" == "on" || "${value}" == "1" ]]
+}
+
+append_image() {
+  local repository="$1"
+  local tag="$2"
+  [[ -n "${repository}" && -n "${tag}" ]] || return 0
+  printf '%s:%s\n' "${repository}" "${tag}"
+}
+
 resolve_images() {
-  python3 - "${VALUES_FILE}" <<'PY'
-import sys
-import yaml
-
-path = sys.argv[1]
-with open(path, "r", encoding="utf-8") as f:
-    values = yaml.safe_load(f) or {}
-
-
-def get(data, *keys, default=None):
-    cur = data
-    for key in keys:
-        if not isinstance(cur, dict) or key not in cur:
-            return default
-        cur = cur[key]
-    return cur
-
-
-def add(images, repository, tag):
-    if repository and tag:
-        images.add(f"{repository}:{tag}")
-
-images = set()
-
-add(images, get(values, "higress-core", "gateway", "repository"), get(values, "higress-core", "gateway", "tag"))
-add(images, get(values, "higress-core", "controller", "repository"), get(values, "higress-core", "controller", "tag"))
-add(images, get(values, "higress-core", "pilot", "repository"), get(values, "higress-core", "pilot", "tag"))
-add(images, get(values, "higress-core", "pluginServer", "repository"), get(values, "higress-core", "pluginServer", "tag"))
-add(images, get(values, "higress-core", "redis", "redis", "repository"), get(values, "higress-core", "redis", "redis", "tag"))
-
-add(images, get(values, "aigateway-console", "image", "repository"), get(values, "aigateway-console", "image", "tag"))
-
-add(images, get(values, "global", "o11y", "grafana", "image", "repository"), get(values, "global", "o11y", "grafana", "image", "tag"))
-add(images, get(values, "global", "o11y", "prometheus", "image", "repository"), get(values, "global", "o11y", "prometheus", "image", "tag"))
-add(images, get(values, "global", "o11y", "loki", "image", "repository"), get(values, "global", "o11y", "loki", "image", "tag"))
-add(images, get(values, "global", "o11y", "promtail", "image", "repository"), get(values, "global", "o11y", "promtail", "image", "tag"))
-
-portal_repository = get(values, "aigateway-portal", "backend", "image", "repository")
-portal_tag = get(values, "aigateway-portal", "backend", "image", "tag")
-if not portal_repository:
-    portal_repository = get(values, "aigateway-portal", "image", "repository")
-if not portal_tag:
-    portal_tag = get(values, "aigateway-portal", "image", "tag")
-add(images, portal_repository, portal_tag)
-add(images,
-    get(values, "aigateway-portal", "mysql", "image", "repository", default="mariadb"),
-    get(values, "aigateway-portal", "mysql", "image", "tag", default="11.4"))
-
-for image in sorted(images):
-    print(image)
-PY
+  {
+    append_image "$(resolve_value "higress-core.gateway.repository")" "$(resolve_value "higress-core.gateway.tag")"
+    append_image "$(resolve_value "higress-core.controller.repository")" "$(resolve_value "higress-core.controller.tag")"
+    append_image "$(resolve_value "higress-core.pilot.repository")" "$(resolve_value "higress-core.pilot.tag")"
+    append_image "$(resolve_value "higress-core.pluginServer.repository")" "$(resolve_value "higress-core.pluginServer.tag")"
+    if value_is_true "$(resolve_value "higress-core.redis.enabled")"; then
+      append_image \
+        "$(resolve_value "higress-core.redis.image.repository")$( [[ -z "$(resolve_value "higress-core.redis.image.repository")" ]] && printf '%s' "$(resolve_value "higress-core.redis.redis.repository")" )" \
+        "$(resolve_value "higress-core.redis.image.tag")$( [[ -z "$(resolve_value "higress-core.redis.image.tag")" ]] && printf '%s' "$(resolve_value "higress-core.redis.redis.tag")" )"
+      if value_is_true "$(resolve_value "higress-core.redis.sentinel.enabled")"; then
+        append_image \
+          "$(resolve_value "higress-core.redis.sentinel.image.repository")" \
+          "$(resolve_value "higress-core.redis.sentinel.image.tag")"
+      fi
+    fi
+    if value_is_true "$(resolve_value "higress-core.postgresql.enabled")"; then
+      append_image \
+        "$(resolve_value "higress-core.postgresql.postgresql.image.repository")" \
+        "$(resolve_value "higress-core.postgresql.postgresql.image.tag")"
+      append_image \
+        "$(resolve_value "higress-core.postgresql.pgpool.image.repository")" \
+        "$(resolve_value "higress-core.postgresql.pgpool.image.tag")"
+    fi
+    append_image "$(resolve_value "aigateway-console.image.repository")" "$(resolve_value "aigateway-console.image.tag")"
+    append_image "$(resolve_value "global.o11y.grafana.image.repository")" "$(resolve_value "global.o11y.grafana.image.tag")"
+    append_image "$(resolve_value "global.o11y.prometheus.image.repository")" "$(resolve_value "global.o11y.prometheus.image.tag")"
+    append_image "$(resolve_value "global.o11y.loki.image.repository")" "$(resolve_value "global.o11y.loki.image.tag")"
+    append_image "$(resolve_value "global.o11y.promtail.image.repository")" "$(resolve_value "global.o11y.promtail.image.tag")"
+    append_image \
+      "$(resolve_value "aigateway-portal.backend.image.repository")$( [[ -z "$(resolve_value "aigateway-portal.backend.image.repository")" ]] && printf '%s' "$(resolve_value "aigateway-portal.image.repository")" )" \
+      "$(resolve_value "aigateway-portal.backend.image.tag")$( [[ -z "$(resolve_value "aigateway-portal.backend.image.tag")" ]] && printf '%s' "$(resolve_value "aigateway-portal.image.tag")" )"
+    if value_is_true "$(resolve_value "aigateway-portal.mysql.enabled")"; then
+      append_image \
+        "$(resolve_value "aigateway-portal.mysql.image.repository")$( [[ -z "$(resolve_value "aigateway-portal.mysql.image.repository")" ]] && printf 'mariadb' )" \
+        "$(resolve_value "aigateway-portal.mysql.image.tag")$( [[ -z "$(resolve_value "aigateway-portal.mysql.image.tag")" ]] && printf '11.4' )"
+    fi
+  } | awk 'NF { images[$0] = 1 } END { for (image in images) print image }' | sort
 }
 
 ensure_local_image() {
@@ -235,11 +221,7 @@ ensure_local_image() {
   repository="${image%:*}"
   tag="${image##*:}"
   fallback_repo="${FALLBACK_IMAGE_REPO[${repository}]:-}"
-
-  if [[ -z "${fallback_repo}" ]]; then
-    echo "Local image not found and no fallback mapping configured: ${image}" >&2
-    return 1
-  fi
+  [[ -n "${fallback_repo}" ]] || dev_die "Local image not found and no fallback mapping configured: ${image}"
 
   fallback_image="${fallback_repo}:${tag}"
   if ! docker image inspect "${fallback_image}" >/dev/null 2>&1; then
@@ -248,16 +230,19 @@ ensure_local_image() {
   run docker tag "${fallback_image}" "${image}"
 }
 
+echo "Using chart dir    : ${CHART_DIR}"
+printf 'Using values files :\n'
+for file in "${FINAL_VALUES_FILES[@]}"; do
+  echo "  - ${file}"
+done
+
 if [[ "${SKIP_BUILD}" != "true" ]]; then
   run "${SCRIPT_DIR}/build-local-images.sh" --components "${BUILD_COMPONENTS}"
 fi
 
 if [[ "${SKIP_LOAD}" != "true" ]]; then
   mapfile -t IMAGES < <(resolve_images)
-  if [[ ${#IMAGES[@]} -eq 0 ]]; then
-    echo "No images resolved from ${VALUES_FILE}" >&2
-    exit 1
-  fi
+  [[ ${#IMAGES[@]} -gt 0 ]] || dev_die "No images resolved from values files"
 
   echo "Loading images into minikube (${#IMAGES[@]} images)..."
   for image in "${IMAGES[@]}"; do
@@ -268,12 +253,17 @@ if [[ "${SKIP_LOAD}" != "true" ]]; then
 fi
 
 if [[ "${SKIP_DEPLOY}" != "true" ]]; then
-  run helm dependency update "${CHART_DIR}"
+  helm_args=()
+  for file in "${FINAL_VALUES_FILES[@]}"; do
+    helm_args+=(-f "${file}")
+  done
+
+  run helm dependency build "${CHART_DIR}"
   run helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" \
     -n "${NAMESPACE}" \
     --create-namespace \
     --render-subchart-notes \
-    -f "${VALUES_FILE}" \
+    "${helm_args[@]}" \
     --wait \
     --timeout "${HELM_TIMEOUT}"
 
@@ -300,4 +290,3 @@ fi
 echo "Redeploy complete."
 echo "  release   : ${RELEASE_NAME}"
 echo "  namespace : ${NAMESPACE}"
-echo "  values    : ${VALUES_FILE}"

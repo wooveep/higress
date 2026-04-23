@@ -1994,7 +1994,7 @@ func TestExtractClaudeStreamingToolCalls(t *testing.T) {
 }
 
 func TestConfigWithDefaultAttributes(t *testing.T) {
-	test.RunTest(t, func(t *testing.T) {
+	test.RunGoTest(t, func(t *testing.T) {
 		t.Run("use default attributes config", func(t *testing.T) {
 			defaultConfig := []byte(`{
 				"use_default_attributes": true
@@ -2002,6 +2002,9 @@ func TestConfigWithDefaultAttributes(t *testing.T) {
 			host, status := test.NewTestHost(defaultConfig)
 			defer host.Reset()
 			require.Equal(t, types.OnPluginStartStatusOK, status)
+			config, err := host.GetMatchConfig()
+			require.NoError(t, err)
+			require.Equal(t, []string{"/completions", "/messages", "/images/generations"}, config.(*AIStatisticsConfig).enablePathSuffixes)
 		})
 
 		t.Run("use default response attributes config", func(t *testing.T) {
@@ -2011,6 +2014,9 @@ func TestConfigWithDefaultAttributes(t *testing.T) {
 			host, status := test.NewTestHost(defaultRespConfig)
 			defer host.Reset()
 			require.Equal(t, types.OnPluginStartStatusOK, status)
+			config, err := host.GetMatchConfig()
+			require.NoError(t, err)
+			require.Equal(t, []string{"/completions", "/messages", "/images/generations"}, config.(*AIStatisticsConfig).enablePathSuffixes)
 		})
 	})
 }

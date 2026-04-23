@@ -1,5 +1,6 @@
 {{- $o11y := .Values.global.o11y  }}
-{{- if $o11y.enabled }}
+{{- $promtailEnabled := or (not (hasKey $o11y.promtail "enabled")) $o11y.promtail.enabled }}
+{{- if and $o11y.enabled $promtailEnabled }}
 {{- $config := $o11y.promtail }}
 apiVersion: v1
 kind: ConfigMap
