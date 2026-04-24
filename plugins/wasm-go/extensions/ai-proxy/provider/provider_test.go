@@ -431,6 +431,7 @@ func TestProviderConfig_IsOriginal(t *testing.T) {
 		expected bool
 	}{
 		{"openai_protocol", protocolOpenAI, false},
+		{"anthropic_protocol", protocolAnthropic, false},
 		{"original_protocol", protocolOriginal, true},
 		{"empty_protocol", "", false},
 		{"unknown_protocol", "unknown", false},
@@ -443,6 +444,57 @@ func TestProviderConfig_IsOriginal(t *testing.T) {
 			}
 			result := config.IsOriginal()
 			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestProviderConfig_IsOpenAIProtocol(t *testing.T) {
+	tests := []struct {
+		name     string
+		protocol string
+		expected bool
+	}{
+		{"auto_protocol", "", true},
+		{"openai_protocol", protocolOpenAI, true},
+		{"anthropic_protocol", protocolAnthropic, false},
+		{"original_protocol", protocolOriginal, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := &ProviderConfig{protocol: tt.protocol}
+			assert.Equal(t, tt.expected, config.IsOpenAIProtocol())
+		})
+	}
+}
+
+func TestProviderConfig_Validate_ProtocolOptions(t *testing.T) {
+	tests := []struct {
+		name        string
+		protocol    string
+		expectError bool
+	}{
+		{"auto_protocol", "", false},
+		{"openai_protocol", protocolOpenAI, false},
+		{"anthropic_protocol", protocolAnthropic, false},
+		{"original_protocol", protocolOriginal, false},
+		{"invalid_protocol", "responses", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := &ProviderConfig{
+				typ:       providerTypeOpenAI,
+				apiTokens: []string{"sk-test"},
+				protocol:  tt.protocol,
+				failover:  &failover{},
+			}
+			err := config.Validate()
+			if tt.expectError {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
 		})
 	}
 }

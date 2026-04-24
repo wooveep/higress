@@ -155,8 +155,9 @@ const (
 	providerTypeVllm       = "vllm"
 	providerTypeGeneric    = "generic"
 
-	protocolOpenAI   = "openai"
-	protocolOriginal = "original"
+	protocolOpenAI    = "openai"
+	protocolAnthropic = "anthropic"
+	protocolOriginal  = "original"
 
 	roleSystem    = "system"
 	roleDeveloper = "developer"
@@ -523,7 +524,15 @@ func (c *ProviderConfig) GetContextCleanupCommands() []string {
 }
 
 func (c *ProviderConfig) IsOpenAIProtocol() bool {
-	return c.protocol == protocolOpenAI
+	return c.protocol == "" || c.protocol == protocolOpenAI
+}
+
+func (c *ProviderConfig) IsAnthropicProtocol() bool {
+	return c.protocol == protocolAnthropic
+}
+
+func (c *ProviderConfig) AllowsProtocolAutoDetect() bool {
+	return !c.IsOriginal()
 }
 
 func (c *ProviderConfig) FromJson(json gjson.Result) {
@@ -564,9 +573,6 @@ func (c *ProviderConfig) FromJson(json gjson.Result) {
 		c.modelMapping[k] = v.String()
 	}
 	c.protocol = json.Get("protocol").String()
-	if c.protocol == "" {
-		c.protocol = protocolOpenAI
-	}
 	contextJson := json.Get("context")
 	if contextJson.Exists() {
 		c.context = &ContextConfig{}
@@ -746,7 +752,7 @@ func normalizeProviderTypeCompat(raw string) string {
 }
 
 func (c *ProviderConfig) Validate() error {
-	if c.protocol != protocolOpenAI && c.protocol != protocolOriginal {
+	if c.protocol != "" && c.protocol != protocolOpenAI && c.protocol != protocolAnthropic && c.protocol != protocolOriginal {
 		return errors.New("invalid protocol in config")
 	}
 	if c.context != nil {
