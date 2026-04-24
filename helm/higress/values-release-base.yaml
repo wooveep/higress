@@ -81,7 +81,7 @@ higress-core:
         size: 1Gi
   gateway:
     repository: aigateway/gateway
-    tag: "1.0.0"
+    tag: "1.1.0"
     service:
       type: LoadBalancer
     hostPort:
@@ -91,16 +91,16 @@ higress-core:
       minAvailable: 1
   controller:
     repository: aigateway/controller
-    tag: "1.0.0"
+    tag: "1.1.0"
     pdb:
       enabled: false
       minAvailable: 1
   pilot:
     repository: aigateway/pilot
-    tag: "1.0.0"
+    tag: "1.1.0"
   pluginServer:
     repository: aigateway/plugin-server
-    tag: "1.0.0"
+    tag: "1.1.0"
     pdb:
       enabled: false
       minAvailable: 1
@@ -116,18 +116,24 @@ aigateway-console:
     displayName: Admin
     password: admin
   service:
-    type: LoadBalancer
+    type: ClusterIP
     port: 8080
+  ingress:
+    enabled: true
+    domain: console.aigateway.io
+    paths:
+      - path: /
+        pathType: Prefix
   image:
     repository: aigateway/console
-    tag: "1.0.0"
+    tag: "1.1.0"
     pullPolicy: IfNotPresent
   pluginServer:
     serviceName: aigateway-plugin-server
   certmanager:
     image:
       repository: aigateway
-      tag: "1.0.0"
+      tag: "1.1.0"
   portalDatabase:
     enabled: true
     driver: postgres
@@ -169,12 +175,16 @@ aigateway-portal:
     rechargeFallbackAvgCostPer1K: 0.02
   image:
     repository: aigateway/portal
-    tag: "1.0.0"
+    tag: "1.1.0"
     pullPolicy: IfNotPresent
   service:
-    type: LoadBalancer
+    type: ClusterIP
     port: 8081
   ingress:
-    enabled: false
+    enabled: true
+    className: aigateway
+    host: portal.aigateway.io
+    path: /
+    pathType: Prefix
   session:
     secretKey: change-me-session-secret

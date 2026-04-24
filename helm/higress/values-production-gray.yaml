@@ -42,20 +42,20 @@ higress-core:
     servers: []
   gateway:
     repository: aigateway/gateway
-    tag: "1.0.0"
+    tag: "1.1.0"
     service:
       type: LoadBalancer
     hostPort:
       enabled: false
   controller:
     repository: aigateway/controller
-    tag: "1.0.0"
+    tag: "1.1.0"
   pilot:
     repository: aigateway/pilot
-    tag: "1.0.0"
+    tag: "1.1.0"
   pluginServer:
     repository: aigateway/plugin-server
-    tag: "1.0.0"
+    tag: "1.1.0"
   redis:
     enabled: true
     image:
@@ -76,14 +76,14 @@ aigateway-console:
     port: 8080
   image:
     repository: aigateway/console
-    tag: "1.0.0-dev-20260424135639"
+    tag: "1.1.0"
     pullPolicy: IfNotPresent
   pluginServer:
     serviceName: aigateway-plugin-server
   certmanager:
     image:
       repository: aigateway
-      tag: "1.0.0"
+      tag: "1.1.0"
   portalDatabase:
     enabled: true
     host: mysql-server
@@ -105,7 +105,7 @@ aigateway-portal:
     host: mysql-server
   image:
     repository: aigateway/portal
-    tag: "1.0.0-dev-20260424135639"
+    tag: "1.1.0"
     pullPolicy: IfNotPresent
   service:
     type: LoadBalancer
