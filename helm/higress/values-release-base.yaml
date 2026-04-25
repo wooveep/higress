@@ -1,5 +1,6 @@
 global:
   local: false
+  onlyPushRouteCluster: false
   ingressClass: aigateway
   enableRedis: true
   enablePluginServer: true
@@ -59,6 +60,7 @@ higress-core:
   redis:
     enabled: true
     fullnameOverride: redis-server
+    serviceNameOverride: redis-server-master
     architecture: standalone
     auth:
       enabled: true
@@ -203,7 +205,7 @@ aigateway-portal:
   backend:
     replicaCount: 1
     dbAutoMigrate: false
-    corePrometheusURL: ""
+    corePrometheusURL: "http://aigateway-console-prometheus:9090/prometheus"
     usageSyncEnabled: true
     usageSyncSeconds: 300
     keyAuthSyncEnabled: true

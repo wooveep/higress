@@ -143,7 +143,7 @@ data:
     {{- end }}
     {{- $_ := set $newData "mcpServer" $mcpServerData }}
     {{- end }}
-    {{- toYaml (merge $existingData $newData) | nindent 4 }}
+    {{- toYaml (mergeOverwrite $existingData $newData) | nindent 4 }}
   # Configuration file for the mesh networks to be used by the Split Horizon EDS.
   meshNetworks: |-
   {{- if .Values.global.meshNetworks }}
