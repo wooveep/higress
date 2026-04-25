@@ -662,6 +662,7 @@ func (b *bedrockProvider) OnRequestHeaders(ctx wrapper.HttpContext, apiName ApiN
 }
 
 func (b *bedrockProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header) {
+	util.SanitizeConsumerAuthHeaders(headers)
 	util.OverwriteRequestHostHeader(headers, fmt.Sprintf(bedrockDefaultDomain, strings.TrimSpace(b.config.awsRegion)))
 
 	// If apiTokens is configured, set Bearer token authentication here

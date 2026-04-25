@@ -48,6 +48,7 @@ func (m *cozeProvider) OnRequestHeaders(ctx wrapper.HttpContext, apiName ApiName
 }
 
 func (m *cozeProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header) {
+	util.SanitizeConsumerAuthHeaders(headers)
 	util.OverwriteRequestHostHeader(headers, cozeDomain)
 	util.OverwriteRequestAuthorizationHeader(headers, "Bearer "+m.config.GetApiTokenInUse(ctx))
 	headers.Del("Content-Length")

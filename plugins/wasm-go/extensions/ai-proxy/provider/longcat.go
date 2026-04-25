@@ -56,6 +56,7 @@ func (m *longcatProvider) OnRequestHeaders(ctx wrapper.HttpContext, apiName ApiN
 }
 
 func (m *longcatProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header) {
+	util.SanitizeConsumerAuthHeaders(headers)
 	util.OverwriteRequestPathHeaderByCapability(headers, string(apiName), m.config.capabilities)
 	util.OverwriteRequestHostHeader(headers, longcatDomain)
 	util.OverwriteRequestAuthorizationHeader(headers, "Bearer "+m.config.GetApiTokenInUse(ctx))

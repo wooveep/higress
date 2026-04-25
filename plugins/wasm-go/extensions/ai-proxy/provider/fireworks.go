@@ -63,6 +63,7 @@ func (f *fireworksProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiNa
 }
 
 func (f *fireworksProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header) {
+	util.SanitizeConsumerAuthHeaders(headers)
 	util.OverwriteRequestPathHeaderByCapability(headers, string(apiName), f.config.capabilities)
 	util.OverwriteRequestHostHeader(headers, fireworksDomain)
 	util.OverwriteRequestAuthorizationHeader(headers, "Bearer "+f.config.GetApiTokenInUse(ctx))

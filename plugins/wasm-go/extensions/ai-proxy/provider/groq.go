@@ -63,6 +63,7 @@ func (g *groqProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName, b
 }
 
 func (g *groqProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header) {
+	util.SanitizeConsumerAuthHeaders(headers)
 	util.OverwriteRequestPathHeaderByCapability(headers, string(apiName), g.config.capabilities)
 	util.OverwriteRequestHostHeader(headers, groqDomain)
 	util.OverwriteRequestAuthorizationHeader(headers, "Bearer "+g.config.GetApiTokenInUse(ctx))

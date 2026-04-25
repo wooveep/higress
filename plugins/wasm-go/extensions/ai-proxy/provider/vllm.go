@@ -100,6 +100,7 @@ func (m *vllmProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName, b
 }
 
 func (m *vllmProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header) {
+	util.SanitizeConsumerAuthHeaders(headers)
 	if m.isDirectCustomPath {
 		util.OverwriteRequestPathHeader(headers, m.customPath)
 	} else if apiName != "" {

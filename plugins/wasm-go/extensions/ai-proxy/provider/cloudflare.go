@@ -6,8 +6,8 @@ import (
 	"strings"
 
 	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-proxy/util"
-	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
+	"github.com/higress-group/wasm-go/pkg/wrapper"
 )
 
 const (
@@ -61,6 +61,7 @@ func (c *cloudflareProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiN
 }
 
 func (c *cloudflareProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header) {
+	util.SanitizeConsumerAuthHeaders(headers)
 	util.OverwriteRequestPathHeader(headers, strings.Replace(cloudflareChatCompletionPath, "{account_id}", c.config.cloudflareAccountId, 1))
 	util.OverwriteRequestHostHeader(headers, cloudflareDomain)
 	util.OverwriteRequestAuthorizationHeader(headers, "Bearer "+c.config.GetApiTokenInUse(ctx))

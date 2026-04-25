@@ -6,8 +6,8 @@ import (
 	"strings"
 
 	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-proxy/util"
-	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
+	"github.com/higress-group/wasm-go/pkg/wrapper"
 )
 
 // githubProvider is the provider for GitHub OpenAI service.
@@ -65,6 +65,7 @@ func (m *githubProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName,
 }
 
 func (m *githubProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header) {
+	util.SanitizeConsumerAuthHeaders(headers)
 	util.OverwriteRequestHostHeader(headers, githubDomain)
 	util.OverwriteRequestPathHeaderByCapability(headers, string(apiName), m.config.capabilities)
 	util.OverwriteRequestAuthorizationHeader(headers, m.config.GetApiTokenInUse(ctx))

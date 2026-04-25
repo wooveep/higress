@@ -250,6 +250,7 @@ func (m *azureProvider) transformRequestPath(ctx wrapper.HttpContext, apiName Ap
 }
 
 func (m *azureProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header) {
+	util.SanitizeConsumerAuthHeaders(headers)
 	contentType := headers.Get(util.HeaderContentType)
 	isMultipartImageRequest := isAzureMultipartImageRequest(apiName, contentType)
 
