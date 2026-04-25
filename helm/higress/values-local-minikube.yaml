@@ -136,7 +136,7 @@ aigateway-console:
     port: 8080
   image:
     repository: aigateway/console
-    tag: "1.1.0"
+    tag: "1.1.0-dev-20260425100829"
     pullPolicy: IfNotPresent
   portalDatabase:
     enabled: true
@@ -168,7 +168,7 @@ aigateway-portal:
     corePrometheusURL: "http://aigateway-console-prometheus:9090/prometheus"
   image:
     repository: aigateway/portal
-    tag: "1.1.0"
+    tag: "1.1.0-dev-20260425100829"
     pullPolicy: IfNotPresent
   service:
     type: LoadBalancer
