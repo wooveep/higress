@@ -10,10 +10,14 @@ import (
 )
 
 const (
-	HeaderContentType   = "Content-Type"
-	HeaderPath          = ":path"
-	HeaderAuthority     = ":authority"
-	HeaderAuthorization = "Authorization"
+	HeaderContentType     = "Content-Type"
+	HeaderPath            = ":path"
+	HeaderAuthority       = ":authority"
+	HeaderAuthorization   = "Authorization"
+	HeaderXAPIKey         = "x-api-key"
+	HeaderXAuthorization  = "x-authorization"
+	HeaderAnthropicAPIKey = "anthropic-api-key"
+	HeaderXGoogAPIKey     = "x-goog-api-key"
 
 	HeaderOriginalPath = "X-ENVOY-ORIGINAL-PATH"
 	HeaderOriginalHost = "X-ENVOY-ORIGINAL-HOST"
@@ -24,6 +28,7 @@ const (
 )
 
 var (
+	managedConsumerAuthHeaders                  = []string{HeaderAuthorization, HeaderXAPIKey, HeaderXAuthorization, HeaderAnthropicAPIKey, HeaderXGoogAPIKey}
 	RegRetrieveBatchPath                        = regexp.MustCompile(`^.*/v1/batches/(?P<batch_id>[^/]+)$`)
 	RegCancelBatchPath                          = regexp.MustCompile(`^.*/v1/batches/(?P<batch_id>[^/]+)/cancel$`)
 	RegRetrieveFilePath                         = regexp.MustCompile(`^.*/v1/files/(?P<file_id>[^/]+)$`)
@@ -199,7 +204,17 @@ func SetOriginalRequestAuth(auth string) {
 }
 
 func OverwriteRequestAuthorizationHeader(headers http.Header, credential string) {
+	if strings.TrimSpace(credential) == "" {
+		headers.Del(HeaderAuthorization)
+		return
+	}
 	headers.Set(HeaderAuthorization, credential)
+}
+
+func SanitizeConsumerAuthHeaders(headers http.Header) {
+	for _, headerName := range managedConsumerAuthHeaders {
+		headers.Del(headerName)
+	}
 }
 
 func HeaderToSlice(header http.Header) [][2]string {

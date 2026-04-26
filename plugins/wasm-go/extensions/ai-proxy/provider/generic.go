@@ -61,6 +61,7 @@ func (m *genericProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName
 func (m *genericProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header) {
 	if len(m.config.apiTokens) > 0 {
 		if token := m.config.GetApiTokenInUse(ctx); token != "" {
+			util.SanitizeConsumerAuthHeaders(headers)
 			util.OverwriteRequestAuthorizationHeader(headers, "Bearer "+token)
 		}
 	}

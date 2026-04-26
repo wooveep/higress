@@ -65,6 +65,7 @@ func (o *openrouterProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiN
 }
 
 func (o *openrouterProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header) {
+	util.SanitizeConsumerAuthHeaders(headers)
 	util.OverwriteRequestPathHeaderByCapability(headers, string(apiName), o.config.capabilities)
 	util.OverwriteRequestHostHeader(headers, openrouterDomain)
 	util.OverwriteRequestAuthorizationHeader(headers, "Bearer "+o.config.GetApiTokenInUse(ctx))

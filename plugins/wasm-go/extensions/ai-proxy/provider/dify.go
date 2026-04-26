@@ -58,6 +58,7 @@ func (d *difyProvider) OnRequestHeaders(ctx wrapper.HttpContext, apiName ApiName
 }
 
 func (d *difyProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header) {
+	util.SanitizeConsumerAuthHeaders(headers)
 	if d.config.difyApiUrl != "" {
 		log.Debugf("use local host: %s", d.config.difyApiUrl)
 		// Extract hostname, including Full URL or Domain

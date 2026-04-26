@@ -23,19 +23,19 @@ mcpServer:
 
 gateway:
   repository: aigateway/gateway
-  tag: "1.0.0"
+  tag: "1.1.0"
 
 controller:
   repository: aigateway/controller
-  tag: "1.0.0"
+  tag: "1.1.0"
 
 pilot:
   repository: aigateway/pilot
-  tag: "1.0.0"
+  tag: "1.1.0"
 
 pluginServer:
   repository: aigateway/plugin-server
-  tag: "1.0.0"
+  tag: "1.1.0"
 
 redis:
   enabled: true

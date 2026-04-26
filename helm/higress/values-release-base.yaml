@@ -1,11 +1,12 @@
 global:
   local: false
+  onlyPushRouteCluster: false
   ingressClass: aigateway
   enableRedis: true
   enablePluginServer: true
   imagePullPolicy: IfNotPresent
   o11y:
-    enabled: false
+    enabled: true
     grafana:
       image:
         repository: aigateway/grafana
@@ -14,6 +15,10 @@ global:
       image:
         repository: aigateway/prometheus
         tag: v2.40.7
+      resources:
+        limits:
+          cpu: 300m
+          memory: 512Mi
     loki:
       image:
         repository: aigateway/loki
@@ -39,12 +44,12 @@ higress-core:
       password: portal
       database: aigateway_portal
       postgresPassword: postgres
-      replicaCount: 3
+      replicaCount: 1
       persistence:
         enabled: true
         size: 10Gi
     pgpool:
-      replicaCount: 2
+      replicaCount: 1
   mcpServer:
     enable: true
     sse_path_suffix: /sse
@@ -55,15 +60,16 @@ higress-core:
   redis:
     enabled: true
     fullnameOverride: redis-server
-    architecture: replication
+    serviceNameOverride: redis-server-master
+    architecture: standalone
     auth:
       enabled: true
       sentinel: true
       password: aigateway-redis
     sentinel:
-      enabled: true
+      enabled: false
       masterService:
-        enabled: true
+        enabled: false
     rbac:
       create: true
     serviceAccount:
@@ -74,14 +80,22 @@ higress-core:
         enabled: true
         size: 1Gi
     replica:
-      replicaCount: 2
+      replicaCount: 0
       automountServiceAccountToken: true
       persistence:
         enabled: true
         size: 1Gi
   gateway:
     repository: aigateway/gateway
-    tag: "1.0.0"
+    tag: "1.1.0"
+    replicas: 1
+    resources:
+      requests:
+        cpu: 500m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        memory: 1024Mi
     service:
       type: LoadBalancer
     hostPort:
@@ -91,16 +105,36 @@ higress-core:
       minAvailable: 1
   controller:
     repository: aigateway/controller
-    tag: "1.0.0"
+    tag: "1.1.0"
+    replicas: 1
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 500m
+        memory: 1024Mi
     pdb:
       enabled: false
       minAvailable: 1
   pilot:
     repository: aigateway/pilot
-    tag: "1.0.0"
+    tag: "1.1.0"
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
   pluginServer:
     repository: aigateway/plugin-server
-    tag: "1.0.0"
+    tag: "1.1.0"
+    replicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
     pdb:
       enabled: false
       minAvailable: 1
@@ -109,6 +143,10 @@ aigateway-console:
   enabled: true
   name: aigateway-console
   replicaCount: 1
+  resources:
+    requests:
+      cpu: 150m
+      memory: 256Mi
   controller:
     serviceName: aigateway-controller
   admin:
@@ -116,18 +154,24 @@ aigateway-console:
     displayName: Admin
     password: admin
   service:
-    type: LoadBalancer
+    type: ClusterIP
     port: 8080
+  ingress:
+    enabled: true
+    domain: console.aigateway.io
+    paths:
+      - path: /
+        pathType: Prefix
   image:
     repository: aigateway/console
-    tag: "1.0.0"
+    tag: "1.1.0"
     pullPolicy: IfNotPresent
   pluginServer:
     serviceName: aigateway-plugin-server
   certmanager:
     image:
       repository: aigateway
-      tag: "1.0.0"
+      tag: "1.1.0"
   portalDatabase:
     enabled: true
     driver: postgres
@@ -161,7 +205,7 @@ aigateway-portal:
   backend:
     replicaCount: 1
     dbAutoMigrate: false
-    corePrometheusURL: ""
+    corePrometheusURL: "http://aigateway-console-prometheus:9090/prometheus"
     usageSyncEnabled: true
     usageSyncSeconds: 300
     keyAuthSyncEnabled: true
@@ -169,12 +213,16 @@ aigateway-portal:
     rechargeFallbackAvgCostPer1K: 0.02
   image:
     repository: aigateway/portal
-    tag: "1.0.0"
+    tag: "1.1.0"
     pullPolicy: IfNotPresent
   service:
-    type: LoadBalancer
+    type: ClusterIP
     port: 8081
   ingress:
-    enabled: false
+    enabled: true
+    className: aigateway
+    host: portal.aigateway.io
+    path: /
+    pathType: Prefix
   session:
     secretKey: change-me-session-secret

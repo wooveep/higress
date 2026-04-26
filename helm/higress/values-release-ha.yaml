@@ -7,6 +7,19 @@ release:
     portal: 2
 
 higress-core:
+  postgresql:
+    postgresql:
+      replicaCount: 3
+    pgpool:
+      replicaCount: 2
+  redis:
+    architecture: replication
+    sentinel:
+      enabled: true
+      masterService:
+        enabled: true
+    replica:
+      replicaCount: 2
   gateway:
     replicas: 3
     pdb:

@@ -322,6 +322,7 @@ func (c *claudeProvider) OnRequestHeaders(ctx wrapper.HttpContext, apiName ApiNa
 }
 
 func (c *claudeProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header) {
+	util.SanitizeConsumerAuthHeaders(headers)
 	util.OverwriteRequestPathHeaderByCapability(headers, string(apiName), c.config.capabilities)
 	util.OverwriteRequestHostHeader(headers, claudeDomain)
 
@@ -335,7 +336,6 @@ func (c *claudeProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiNam
 		// Claude Code mode: use OAuth token with Bearer authorization
 		token := c.config.GetApiTokenInUse(ctx)
 		headers.Set("authorization", "Bearer "+token)
-		headers.Del("x-api-key")
 
 		// Set Claude Code specific headers
 		headers.Set("user-agent", claudeCodeUserAgent)

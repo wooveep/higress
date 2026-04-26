@@ -109,12 +109,14 @@ type qwenProvider struct {
 }
 
 func (m *qwenProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header) {
+	util.SanitizeConsumerAuthHeaders(headers)
 	if m.config.qwenDomain != "" {
 		util.OverwriteRequestHostHeader(headers, m.config.qwenDomain)
 	} else {
 		util.OverwriteRequestHostHeader(headers, qwenDefaultDomain)
 	}
 	util.OverwriteRequestAuthorizationHeader(headers, "Bearer "+m.config.GetApiTokenInUse(ctx))
+	headers.Set(util.HeaderXAPIKey, m.config.GetApiTokenInUse(ctx))
 
 	if !m.config.IsOriginal() {
 		util.OverwriteRequestPathHeaderByCapability(headers, string(apiName), m.config.capabilities)
