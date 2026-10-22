@@ -18,32 +18,13 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"reflect"
 	"testing"
-	"time"
 
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 	"github.com/higress-group/wasm-go/pkg/test"
 	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/stretchr/testify/require"
 )
-
-func redisCalloutQueries(t *testing.T, host test.TestHost) []string {
-	t.Helper()
-
-	hostValue := reflect.ValueOf(host)
-	require.Equal(t, reflect.Ptr, hostValue.Kind())
-
-	contextField := hostValue.Elem().FieldByName("currentContextID")
-	require.True(t, contextField.IsValid())
-
-	attrs := host.GetRedisCalloutAttributesFromContext(uint32(contextField.Uint()))
-	queries := make([]string, 0, len(attrs))
-	for _, item := range attrs {
-		queries = append(queries, string(item.Query))
-	}
-	return queries
-}
 
 // 测试配置：基础配置
 var basicConfig = func() json.RawMessage {
@@ -55,23 +36,6 @@ var basicConfig = func() json.RawMessage {
 			"/v1/chat/completions",
 			"/v1/messages",
 		},
-		"redis": map[string]interface{}{
-			"service_name": "redis.static",
-			"service_port": 6379,
-			"timeout":      1000,
-			"database":     0,
-		},
-	})
-	return data
-}()
-
-var amountConfig = func() json.RawMessage {
-	data, _ := json.Marshal(map[string]interface{}{
-		"admin_consumer":     "admin",
-		"quota_unit":         "amount",
-		"balance_key_prefix": "billing:balance:",
-		"price_key_prefix":   "billing:model-price:",
-		"usage_event_stream": "billing:usage:stream",
 		"redis": map[string]interface{}{
 			"service_name": "redis.static",
 			"service_port": 6379,
@@ -227,18 +191,6 @@ func TestParseConfig(t *testing.T) {
 			require.Equal(t, types.OnPluginStartStatusFailed, status)
 		})
 
-		t.Run("amount config", func(t *testing.T) {
-			host, status := test.NewTestHost(amountConfig)
-			defer host.Reset()
-			require.Equal(t, types.OnPluginStartStatusOK, status)
-			config, err := host.GetMatchConfig()
-			require.NoError(t, err)
-			quotaConfig := config.(*QuotaConfig)
-			require.Equal(t, QuotaUnitAmount, quotaConfig.QuotaUnit)
-			require.Equal(t, "billing:balance:", quotaConfig.BalanceKeyPrefix)
-			require.Equal(t, "billing:model-price:", quotaConfig.PriceKeyPrefix)
-		})
-
 		t.Run("default path suffixes", func(t *testing.T) {
 			host, status := test.NewTestHost(defaultPathSuffixesConfig)
 			defer host.Reset()
@@ -248,7 +200,7 @@ func TestParseConfig(t *testing.T) {
 			require.NotNil(t, config)
 
 			quotaConfig := config.(*QuotaConfig)
-			require.Equal(t, []string{"/v1/chat/completions", "/v1/messages", "/v1/completions", "/v1/responses", "/v1/embeddings", "/v1/images/generations"}, quotaConfig.EnablePathSuffixes)
+			require.Equal(t, []string{"/v1/chat/completions", "/v1/messages"}, quotaConfig.EnablePathSuffixes)
 		})
 	})
 }
@@ -323,21 +275,6 @@ func TestOnHttpRequestHeaders(t *testing.T) {
 			// 无consumer应该返回ActionContinue
 			require.Equal(t, types.ActionContinue, action)
 		})
-
-		t.Run("amount mode should buffer request body", func(t *testing.T) {
-			host, status := test.NewTestHost(amountConfig)
-			defer host.Reset()
-			require.Equal(t, types.OnPluginStartStatusOK, status)
-
-			action := host.CallOnHttpRequestHeaders([][2]string{
-				{":authority", "example.com"},
-				{":path", "/v1/chat/completions"},
-				{":method", "POST"},
-				{"x-mse-consumer", "consumer1"},
-			})
-
-			require.Equal(t, types.HeaderStopIteration, action)
-		})
 	})
 }
 
@@ -394,67 +331,6 @@ func TestOnHttpRequestBody(t *testing.T) {
 
 			// 聊天完成模式应该返回ActionContinue
 			require.Equal(t, types.ActionContinue, action)
-		})
-
-		t.Run("amount mode", func(t *testing.T) {
-			host, status := test.NewTestHost(amountConfig)
-			defer host.Reset()
-			require.Equal(t, types.OnPluginStartStatusOK, status)
-
-			action := host.CallOnHttpRequestHeaders([][2]string{
-				{":authority", "example.com"},
-				{":path", "/v1/chat/completions"},
-				{":method", "POST"},
-				{"x-mse-consumer", "consumer1"},
-			})
-			require.Equal(t, types.HeaderStopIteration, action)
-
-			action = host.CallOnHttpRequestBody([]byte(`{"model":"qwen-plus","messages":[{"role":"user","content":"hello"}]}`))
-			require.Equal(t, types.ActionPause, action)
-
-			host.CallOnRedisCall(0, test.CreateRedisRespArray([]interface{}{
-				"model_id", "qwen-plus",
-				"price_version_id", "1",
-				"input_price_per_1k_micro_yuan", "1000",
-				"output_price_per_1k_micro_yuan", "2000",
-			}))
-			host.CallOnRedisCall(0, test.CreateRedisRespArray([]interface{}{1, "ok", 1000000}))
-
-			action = host.GetHttpStreamAction()
-			require.Equal(t, types.ActionContinue, action)
-			host.CompleteHttp()
-		})
-
-		t.Run("amount mode denied by user daily window", func(t *testing.T) {
-			host, status := test.NewTestHost(amountConfig)
-			defer host.Reset()
-			require.Equal(t, types.OnPluginStartStatusOK, status)
-
-			action := host.CallOnHttpRequestHeaders([][2]string{
-				{":authority", "example.com"},
-				{":path", "/v1/chat/completions"},
-				{":method", "POST"},
-				{"x-mse-consumer", "consumer1"},
-				{"x-higress-api-key-id", "KEY123"},
-			})
-			require.Equal(t, types.HeaderStopIteration, action)
-
-			action = host.CallOnHttpRequestBody([]byte(`{"model":"qwen-plus","messages":[{"role":"user","content":"hello"}]}`))
-			require.Equal(t, types.ActionPause, action)
-
-			host.CallOnRedisCall(0, test.CreateRedisRespArray([]interface{}{
-				"model_id", "qwen-plus",
-				"price_version_id", "1",
-				"input_price_per_1k_micro_yuan", "1000",
-				"output_price_per_1k_micro_yuan", "2000",
-			}))
-			host.CallOnRedisCall(0, test.CreateRedisRespArray([]interface{}{0, "user_daily_limit_exceeded", 1000000}))
-
-			response := host.GetLocalResponse()
-			require.NotNil(t, response)
-			require.Equal(t, uint32(http.StatusForbidden), response.StatusCode)
-			require.Contains(t, string(response.Data), "User daily quota exceeded")
-			host.CompleteHttp()
 		})
 	})
 }
@@ -545,131 +421,6 @@ func TestOnHttpStreamingResponseBody(t *testing.T) {
 			require.Equal(t, types.ActionContinue, action)
 			require.Equal(t, data, host.GetResponseBody())
 			host.CompleteHttp()
-		})
-
-		t.Run("amount mode emits interrupted usage event on stream done when usage was captured", func(t *testing.T) {
-			host, status := test.NewTestHost(amountConfig)
-			defer host.Reset()
-			require.Equal(t, types.OnPluginStartStatusOK, status)
-
-			action := host.CallOnHttpRequestHeaders([][2]string{
-				{":authority", "example.com"},
-				{":path", "/v1/chat/completions"},
-				{":method", "POST"},
-				{"x-mse-consumer", "consumer1"},
-			})
-			require.Equal(t, types.HeaderStopIteration, action)
-
-			action = host.CallOnHttpRequestBody([]byte(`{"model":"qwen-plus","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
-			require.Equal(t, types.ActionPause, action)
-
-			host.CallOnRedisCall(0, test.CreateRedisRespArray([]interface{}{
-				"model_id", "qwen-plus",
-				"price_version_id", "1",
-				"input_price_per_1k_micro_yuan", "1000",
-				"output_price_per_1k_micro_yuan", "2000",
-			}))
-			host.CallOnRedisCall(0, test.CreateRedisRespArray([]interface{}{1, "ok", 1000000}))
-
-			action = host.GetHttpStreamAction()
-			require.Equal(t, types.ActionContinue, action)
-
-			action = host.CallOnHttpStreamingResponseBody([]byte(`data: {"usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20}}`), false)
-			require.Equal(t, types.ActionContinue, action)
-
-			require.Empty(t, redisCalloutQueries(t, host))
-			host.CompleteHttp()
-
-			queries := redisCalloutQueries(t, host)
-			require.Len(t, queries, 1)
-			lastQuery := queries[len(queries)-1]
-			require.Contains(t, lastQuery, "stream_interrupted")
-			require.Contains(t, lastQuery, "parsed")
-			require.Contains(t, lastQuery, "failed")
-			require.Contains(t, lastQuery, "499")
-			require.Contains(t, lastQuery, "20")
-			require.Contains(t, lastQuery, "28")
-		})
-
-		t.Run("amount mode emits interrupted audit event when no usage was captured", func(t *testing.T) {
-			host, status := test.NewTestHost(amountConfig)
-			defer host.Reset()
-			require.Equal(t, types.OnPluginStartStatusOK, status)
-
-			action := host.CallOnHttpRequestHeaders([][2]string{
-				{":authority", "example.com"},
-				{":path", "/v1/chat/completions"},
-				{":method", "POST"},
-				{"x-mse-consumer", "consumer1"},
-			})
-			require.Equal(t, types.HeaderStopIteration, action)
-
-			action = host.CallOnHttpRequestBody([]byte(`{"model":"qwen-plus","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
-			require.Equal(t, types.ActionPause, action)
-
-			host.CallOnRedisCall(0, test.CreateRedisRespArray([]interface{}{
-				"model_id", "qwen-plus",
-				"price_version_id", "1",
-				"input_price_per_1k_micro_yuan", "1000",
-				"output_price_per_1k_micro_yuan", "2000",
-			}))
-			host.CallOnRedisCall(0, test.CreateRedisRespArray([]interface{}{1, "ok", 1000000}))
-
-			action = host.GetHttpStreamAction()
-			require.Equal(t, types.ActionContinue, action)
-
-			action = host.CallOnHttpStreamingResponseBody([]byte(`data: {"choices":[{"delta":{"content":"partial"}}]}`), false)
-			require.Equal(t, types.ActionContinue, action)
-
-			require.Empty(t, redisCalloutQueries(t, host))
-			host.CompleteHttp()
-
-			queries := redisCalloutQueries(t, host)
-			require.Len(t, queries, 1)
-			lastQuery := queries[len(queries)-1]
-			require.Contains(t, lastQuery, "stream_interrupted")
-			require.Contains(t, lastQuery, "missing")
-			require.Contains(t, lastQuery, "499")
-		})
-
-		t.Run("amount mode end of stream does not double emit on stream done", func(t *testing.T) {
-			host, status := test.NewTestHost(amountConfig)
-			defer host.Reset()
-			require.Equal(t, types.OnPluginStartStatusOK, status)
-
-			action := host.CallOnHttpRequestHeaders([][2]string{
-				{":authority", "example.com"},
-				{":path", "/v1/chat/completions"},
-				{":method", "POST"},
-				{"x-mse-consumer", "consumer1"},
-			})
-			require.Equal(t, types.HeaderStopIteration, action)
-
-			action = host.CallOnHttpRequestBody([]byte(`{"model":"qwen-plus","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
-			require.Equal(t, types.ActionPause, action)
-
-			host.CallOnRedisCall(0, test.CreateRedisRespArray([]interface{}{
-				"model_id", "qwen-plus",
-				"price_version_id", "1",
-				"input_price_per_1k_micro_yuan", "1000",
-				"output_price_per_1k_micro_yuan", "2000",
-			}))
-			host.CallOnRedisCall(0, test.CreateRedisRespArray([]interface{}{1, "ok", 1000000}))
-
-			action = host.GetHttpStreamAction()
-			require.Equal(t, types.ActionContinue, action)
-
-			action = host.CallOnHttpStreamingResponseBody([]byte(`data: {"usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20}}`), true)
-			require.Equal(t, types.ActionContinue, action)
-
-			queriesBeforeDone := redisCalloutQueries(t, host)
-			require.Len(t, queriesBeforeDone, 1)
-			lastQuery := queriesBeforeDone[len(queriesBeforeDone)-1]
-			require.Contains(t, lastQuery, "parsed")
-			require.NotContains(t, lastQuery, "stream_interrupted")
-
-			host.CompleteHttp()
-			require.Len(t, redisCalloutQueries(t, host), 1)
 		})
 	})
 }
@@ -771,7 +522,7 @@ func TestGetOperationMode(t *testing.T) {
 			name:      "chat completion mode",
 			path:      "/v1/chat/completions",
 			adminPath: "/quota",
-			suffixes:  []string{"/v1/chat/completions", "/v1/messages", "/v1/completions", "/v1/responses", "/v1/embeddings", "/v1/images/generations"},
+			suffixes:  []string{"/v1/chat/completions", "/v1/messages"},
 			chatMode:  ChatModeCompletion,
 			adminMode: AdminModeNone,
 		},
@@ -779,7 +530,7 @@ func TestGetOperationMode(t *testing.T) {
 			name:      "admin query mode",
 			path:      "/v1/chat/completions/quota",
 			adminPath: "/quota",
-			suffixes:  []string{"/v1/chat/completions", "/v1/messages", "/v1/completions", "/v1/responses", "/v1/embeddings", "/v1/images/generations"},
+			suffixes:  []string{"/v1/chat/completions", "/v1/messages"},
 			chatMode:  ChatModeAdmin,
 			adminMode: AdminModeQuery,
 		},
@@ -787,7 +538,7 @@ func TestGetOperationMode(t *testing.T) {
 			name:      "admin refresh mode",
 			path:      "/v1/chat/completions/quota/refresh",
 			adminPath: "/quota",
-			suffixes:  []string{"/v1/chat/completions", "/v1/messages", "/v1/completions", "/v1/responses", "/v1/embeddings", "/v1/images/generations"},
+			suffixes:  []string{"/v1/chat/completions", "/v1/messages"},
 			chatMode:  ChatModeAdmin,
 			adminMode: AdminModeRefresh,
 		},
@@ -795,7 +546,7 @@ func TestGetOperationMode(t *testing.T) {
 			name:      "admin delta mode",
 			path:      "/v1/chat/completions/quota/delta",
 			adminPath: "/quota",
-			suffixes:  []string{"/v1/chat/completions", "/v1/messages", "/v1/completions", "/v1/responses", "/v1/embeddings", "/v1/images/generations"},
+			suffixes:  []string{"/v1/chat/completions", "/v1/messages"},
 			chatMode:  ChatModeAdmin,
 			adminMode: AdminModeDelta,
 		},
@@ -803,7 +554,7 @@ func TestGetOperationMode(t *testing.T) {
 			name:      "anthropic messages completion mode",
 			path:      "/v1/messages",
 			adminPath: "/quota",
-			suffixes:  []string{"/v1/chat/completions", "/v1/messages", "/v1/completions", "/v1/responses", "/v1/embeddings", "/v1/images/generations"},
+			suffixes:  []string{"/v1/chat/completions", "/v1/messages"},
 			chatMode:  ChatModeCompletion,
 			adminMode: AdminModeNone,
 		},
@@ -827,7 +578,7 @@ func TestGetOperationMode(t *testing.T) {
 			name:      "messages admin path not supported",
 			path:      "/v1/messages/quota",
 			adminPath: "/quota",
-			suffixes:  []string{"/v1/chat/completions", "/v1/messages", "/v1/completions", "/v1/responses", "/v1/embeddings", "/v1/images/generations"},
+			suffixes:  []string{"/v1/chat/completions", "/v1/messages"},
 			chatMode:  ChatModeNone,
 			adminMode: AdminModeNone,
 		},
@@ -835,16 +586,8 @@ func TestGetOperationMode(t *testing.T) {
 			name:      "none mode",
 			path:      "/other/path",
 			adminPath: "/quota",
-			suffixes:  []string{"/v1/chat/completions", "/v1/messages", "/v1/completions", "/v1/responses", "/v1/embeddings", "/v1/images/generations"},
+			suffixes:  []string{"/v1/chat/completions", "/v1/messages"},
 			chatMode:  ChatModeNone,
-			adminMode: AdminModeNone,
-		},
-		{
-			name:      "image generation mode",
-			path:      "/v1/images/generations",
-			adminPath: "/quota",
-			suffixes:  []string{"/v1/images/generations"},
-			chatMode:  ChatModeCompletion,
 			adminMode: AdminModeNone,
 		},
 	}
@@ -856,86 +599,4 @@ func TestGetOperationMode(t *testing.T) {
 			require.Equal(t, tt.adminMode, adminMode)
 		})
 	}
-}
-
-func TestRequestKindFromPath(t *testing.T) {
-	require.Equal(t, "images.generations", requestKindFromPath("/v1/images/generations"))
-	require.Equal(t, "chat.completions", requestKindFromPath("/v1/chat/completions"))
-	require.Equal(t, "unknown", requestKindFromPath("/other/path"))
-}
-
-func TestBuildAmountChargeArgs(t *testing.T) {
-	startedAt := time.Date(2026, time.March, 25, 10, 0, 0, 0, time.UTC)
-	finishedAt := time.Date(2026, time.March, 25, 10, 29, 59, 0, time.UTC)
-	occurredAt := time.Date(2026, time.March, 25, 10, 30, 0, 0, time.UTC)
-	args := buildAmountChargeArgs(
-		308,
-		"evt-1",
-		"req-1",
-		"trace-1",
-		"consumer1",
-		"route-a",
-		"/v1/chat/completions",
-		"chat.completions",
-		"qwen-plus",
-		"success",
-		"parsed",
-		200,
-		"",
-		"",
-		120,
-		130,
-		250,
-		30,
-		20,
-		10,
-		5,
-		12,
-		18,
-		2,
-		1,
-		1,
-		"1h",
-		`{"cached_tokens":5}`,
-		`{"image_tokens":18}`,
-		`{"cache_ttl":"1h"}`,
-		9,
-		"KEY123",
-		startedAt,
-		finishedAt,
-		occurredAt,
-		3600,
-		7200,
-		10800,
-	)
-
-	require.Len(t, args, 38)
-	require.Equal(t, int64(308), args[0])
-	require.Equal(t, "trace-1", args[3])
-	require.Equal(t, "success", args[9])
-	require.Equal(t, int64(30), args[17])
-	require.Equal(t, "1h", args[26])
-	require.Equal(t, `{"cache_ttl":"1h"}`, args[29])
-	require.Equal(t, "KEY123", args[31])
-	require.Equal(t, startedAt.Format(time.RFC3339Nano), args[32])
-	require.Equal(t, finishedAt.Format(time.RFC3339Nano), args[33])
-	require.Equal(t, occurredAt.Format(time.RFC3339Nano), args[34])
-	require.Equal(t, int64(3600), args[35])
-	require.Equal(t, int64(7200), args[36])
-	require.Equal(t, int64(10800), args[37])
-}
-
-func TestPreferredBillingModelName(t *testing.T) {
-	require.Equal(t, "qwen-plus", preferredBillingModelName("qwen-plus", "qwen-plus-2026-04-01"))
-	require.Equal(t, "gemini-2.5-pro", preferredBillingModelName("", "gemini-2.5-pro"))
-	require.Equal(t, "", preferredBillingModelName("", "unknown"))
-}
-
-func TestAmountWindowTTLSecondsUsesUTC(t *testing.T) {
-	now := time.Date(2026, time.April, 1, 23, 30, 0, 0, time.UTC)
-	dailyTTL, weeklyTTL, monthlyTTL := amountWindowTTLSeconds(now)
-
-	require.Equal(t, int64(30*60), dailyTTL)
-	require.Equal(t, int64(4*24*60*60+30*60), weeklyTTL)
-	require.Equal(t, int64(29*24*60*60+30*60), monthlyTTL)
 }

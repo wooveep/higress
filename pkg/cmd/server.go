@@ -102,8 +102,8 @@ func getServerCommand() *cobra.Command {
 		},
 	}
 
-	serveCmd.PersistentFlags().StringVar(&serverArgs.GatewaySelectorKey, "gatewaySelectorKey", "aigateway", "gateway resource selector label key")
-	serveCmd.PersistentFlags().StringVar(&serverArgs.GatewaySelectorValue, "gatewaySelectorValue", "aigateway-system-aigateway-gateway", "gateway resource selector label value")
+	serveCmd.PersistentFlags().StringVar(&serverArgs.GatewaySelectorKey, "gatewaySelectorKey", "higress", "gateway resource selector label key")
+	serveCmd.PersistentFlags().StringVar(&serverArgs.GatewaySelectorValue, "gatewaySelectorValue", "higress-system-higress-gateway", "gateway resource selector label value")
 	serveCmd.PersistentFlags().BoolVar(&serverArgs.EnableStatus, "enableStatus", true, "enable the ingress status syncer which use to update the ip in ingress's status")
 	serveCmd.PersistentFlags().StringVar(&serverArgs.IngressClass, "ingressClass", innerconstants.DefaultIngressClass, "if not empty, only watch the ingresses have the specified class, otherwise watch all ingresses")
 	serveCmd.PersistentFlags().StringVar(&serverArgs.GatewayClass, "gatewayClass", innerconstants.DefaultGatewayClass, "if not empty, only process Gateway API resources that belong to the specified GatewayClass")

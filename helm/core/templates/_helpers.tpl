@@ -1,5 +1,5 @@
 {{- define "gateway.name" -}}
-{{- .Values.gateway.name | default "aigateway-gateway" -}}
+{{- .Values.gateway.name | default "higress-gateway" -}}
 {{- end }}
 
 {{/*
@@ -18,7 +18,7 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/name: {{ include "gateway.name" . }}
 {{- range $key, $val := .Values.gateway.labels }}
-{{- if not (or (eq $key "app") (eq $key "aigateway") (eq $key "higress")) }}
+{{- if not (or (eq $key "app") (eq $key "higress")) }}
 {{ $key | quote }}: {{ $val | quote }}
 {{- end }}
 {{- end }}
@@ -30,16 +30,12 @@ app.kubernetes.io/name: {{ include "gateway.name" . }}
 {{- end}}
 {{- else }}app: {{ include "gateway.name" . }}
 {{- end }}
-{{- if hasKey .Values.gateway.labels "aigateway" }}
-{{- with .Values.gateway.labels.aigateway }}
-aigateway: {{.|quote}}
-{{- end}}
-{{- else if hasKey .Values.gateway.labels "higress" }}
+{{- if hasKey .Values.gateway.labels "higress" }}
 {{- with .Values.gateway.labels.higress }}
-aigateway: {{.|quote}}
+higress: {{.|quote}}
 {{- end}}
 {{- else }}
-aigateway: {{ .Release.Namespace }}-{{ include "gateway.name" . }}
+higress: {{ .Release.Namespace }}-{{ include "gateway.name" . }}
 {{- end }}
 {{- end }}
 
@@ -51,20 +47,8 @@ aigateway: {{ .Release.Namespace }}-{{ include "gateway.name" . }}
 {{- end }}
 {{- end }}
 
-{{- define "higress.image" -}}
-{{- if .repository -}}
-{{- if .tag -}}
-{{- printf "%s:%s" .repository .tag -}}
-{{- else -}}
-{{- .repository -}}
-{{- end -}}
-{{- else -}}
-{{- printf "%s/higress/%s:%s" .hub .image .tag -}}
-{{- end -}}
-{{- end }}
-
 {{- define "controller.name" -}}
-{{- .Values.controller.name | default "aigateway-controller" -}}
+{{- .Values.controller.name | default "higress-controller" -}}
 {{- end }}
 
 {{- define "controller.chart" -}}
@@ -131,7 +115,7 @@ kind: VMPodScrape
 {{- end -}}
 
 {{- define "pluginServer.name" -}}
-{{- .Values.pluginServer.name | default "aigateway-plugin-server" -}}
+{{- .Values.pluginServer.name | default "higress-plugin-server" -}}
 {{- end }}
 
 {{- define "pluginServer.chart" -}}

@@ -151,7 +151,7 @@ const (
 	providerTypeDeepl      = "deepl"
 	providerTypeMistral    = "mistral"
 	providerTypeCohere     = "cohere"
-	providerTypeVolcengine = "volcengine"
+	providerTypeDoubao     = "doubao"
 	providerTypeCoze       = "coze"
 	providerTypeTogetherAI = "together-ai"
 	providerTypeDify       = "dify"
@@ -258,7 +258,7 @@ var (
 		providerTypeDeepl:      &deeplProviderInitializer{},
 		providerTypeMistral:    &mistralProviderInitializer{},
 		providerTypeCohere:     &cohereProviderInitializer{},
-		providerTypeVolcengine: &volcengineProviderInitializer{},
+		providerTypeDoubao:     &doubaoProviderInitializer{},
 		providerTypeCoze:       &cozeProviderInitializer{},
 		providerTypeTogetherAI: &togetherAIProviderInitializer{},
 		providerTypeDify:       &difyProviderInitializer{},
@@ -499,15 +499,9 @@ type ProviderConfig struct {
 	// @Title zh-CN vLLM主机地址
 	// @Description zh-CN 仅适用于vLLM服务，指定vLLM服务器的主机地址，例如：vllm-service.cluster.local
 	vllmServerHost string `required:"false" yaml:"vllmServerHost" json:"vllmServerHost"`
-	// @Title zh-CN 火山方舟客户端请求 ID
-	// @Description zh-CN 仅适用于火山引擎服务。会透传为 X-Client-Request-Id 请求头，用于问题排查。
-	volcengineClientRequestID string `required:"false" yaml:"volcengineClientRequestId" json:"volcengineClientRequestId"`
-	// @Title zh-CN 启用火山方舟会话加密
-	// @Description zh-CN 仅适用于火山引擎服务。启用后会附加 x-is-encrypted: true 请求头。
-	volcengineEnableEncryption bool `required:"false" yaml:"volcengineEnableEncryption" json:"volcengineEnableEncryption"`
-	// @Title zh-CN 启用火山方舟 Trace 上报
-	// @Description zh-CN 仅适用于火山引擎服务。启用后会附加 X-Fornax-Trace: true 请求头。
-	volcengineEnableTrace bool `required:"false" yaml:"volcengineEnableTrace" json:"volcengineEnableTrace"`
+	// @Title zh-CN 豆包服务域名
+	// @Description zh-CN 仅适用于豆包服务，默认转发域名为 ark.cn-beijing.volces.com
+	doubaoDomain string `required:"false" yaml:"doubaoDomain" json:"doubaoDomain"`
 	// @Title zh-CN Claude Code 模式
 	// @Description zh-CN 仅适用于Claude服务。启用后将伪装成Claude Code客户端发起请求，支持使用Claude Code的OAuth Token进行认证。
 	claudeCodeMode bool `required:"false" yaml:"claudeCodeMode" json:"claudeCodeMode"`
@@ -583,7 +577,7 @@ func (c *ProviderConfig) supportsMessageReasoningContent() bool {
 
 func (c *ProviderConfig) FromJson(json gjson.Result) {
 	c.id = json.Get("id").String()
-	c.typ = normalizeProviderTypeCompat(json.Get("type").String())
+	c.typ = json.Get("type").String()
 	c.apiTokens = make([]string, 0)
 	for _, token := range json.Get("apiTokens").Array() {
 		c.apiTokens = append(c.apiTokens, token.String())
@@ -774,9 +768,7 @@ func (c *ProviderConfig) FromJson(json gjson.Result) {
 	c.genericHost = json.Get("genericHost").String()
 	c.vllmServerHost = json.Get("vllmServerHost").String()
 	c.vllmCustomUrl = json.Get("vllmCustomUrl").String()
-	c.volcengineClientRequestID = json.Get("volcengineClientRequestId").String()
-	c.volcengineEnableEncryption = json.Get("volcengineEnableEncryption").Bool()
-	c.volcengineEnableTrace = json.Get("volcengineEnableTrace").Bool()
+	c.doubaoDomain = json.Get("doubaoDomain").String()
 	c.claudeCodeMode = json.Get("claudeCodeMode").Bool()
 	c.zhipuDomain = json.Get("zhipuDomain").String()
 	c.zhipuCodePlanMode = json.Get("zhipuCodePlanMode").Bool()
@@ -788,9 +780,6 @@ func (c *ProviderConfig) FromJson(json gjson.Result) {
 	}
 	c.mergeConsecutiveMessages = json.Get("mergeConsecutiveMessages").Bool()
 	c.providerDomain = json.Get("providerDomain").String()
-	if c.providerDomain == "" {
-		c.providerDomain = json.Get("doubaoDomain").String()
-	}
 	c.promoteThinkingOnEmpty = json.Get("promoteThinkingOnEmpty").Bool()
 	c.logUpstreamErrorResponseBody = json.Get("logUpstreamErrorResponseBody").Bool()
 	c.hiclawMode = json.Get("hiclawMode").Bool()
@@ -799,15 +788,6 @@ func (c *ProviderConfig) FromJson(json gjson.Result) {
 		c.promoteThinkingOnEmpty = true
 	}
 	c.providerBasePath = json.Get("providerBasePath").String()
-}
-
-func normalizeProviderTypeCompat(raw string) string {
-	switch strings.TrimSpace(strings.ToLower(raw)) {
-	case "doubao":
-		return providerTypeVolcengine
-	default:
-		return strings.TrimSpace(strings.ToLower(raw))
-	}
 }
 
 func (c *ProviderConfig) Validate() error {

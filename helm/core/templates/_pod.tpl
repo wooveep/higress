@@ -4,7 +4,6 @@ Rendering the pod template of gateway component.
 */}}
 {{- define "gateway.podTemplate" -}}
 {{- $o11y := .Values.global.o11y -}}
-{{- $promtailEnabled := and $o11y.enabled (or (not (hasKey $o11y.promtail "enabled")) $o11y.promtail.enabled) -}}
 template:
   metadata:
     annotations:
@@ -40,7 +39,7 @@ template:
     {{- end }}
     containers:
       - name: higress-gateway
-        image: "{{ include "higress.image" (dict "repository" .Values.gateway.repository "hub" (.Values.gateway.hub | default .Values.global.hub) "image" (.Values.gateway.image | default "gateway") "tag" (.Values.gateway.tag | default .Chart.AppVersion)) }}"
+        image: "{{ .Values.gateway.hub | default .Values.global.hub }}/higress/{{ .Values.gateway.image | default "gateway" }}:{{ .Values.gateway.tag | default .Chart.AppVersion }}"
         {{- if .Values.gateway.imagePullPolicy }}
         imagePullPolicy: {{ .Values.gateway.imagePullPolicy }}
         {{- else if .Values.global.imagePullPolicy }}
@@ -54,7 +53,7 @@ template:
           - --proxyLogLevel={{- default "warning" .Values.global.proxy.logLevel }}
           - --proxyComponentLogLevel={{- default "misc:error" .Values.global.proxy.componentLogLevel }}
           - --log_output_level={{- default "default:info" .Values.global.logging.level }}
-          - --serviceCluster=aigateway-gateway
+          - --serviceCluster=higress-gateway
         securityContext:
         {{- if .Values.gateway.containerSecurityContext }}
           {{- toYaml .Values.gateway.containerSecurityContext | nindent 10 }}
@@ -124,7 +123,7 @@ template:
         - name: ISTIO_META_CLUSTER_ID
           value: "{{ $.Values.clusterName | default `Kubernetes` }}"
         - name: INSTANCE_NAME
-          value: "aigateway-gateway"
+          value: "higress-gateway"
         {{- if .Values.global.liteMetrics }}
         - name: LITE_METRICS
           value: "on"
@@ -150,23 +149,21 @@ template:
         - containerPort: 15090
           protocol: TCP
           name: http-envoy-prom
+        {{- if or .Values.global.local .Values.global.kind }}
         - containerPort: {{ .Values.gateway.httpPort }}
-          {{- if .Values.gateway.hostPort.enabled }}
-          hostPort: {{ .Values.gateway.httpPort }}
-          {{- end }}
+          hostPort:  {{ .Values.gateway.httpPort }}
           name: http
           protocol: TCP
-        - containerPort: {{ .Values.gateway.httpsPort }}
-          {{- if .Values.gateway.hostPort.enabled }}
-          hostPort: {{ .Values.gateway.httpsPort }}
-          {{- end }}
+        - containerPort:  {{ .Values.gateway.httpsPort }}
+          hostPort:  {{ .Values.gateway.httpsPort }}
           name: https
           protocol: TCP
+        {{- end }}
         readinessProbe:
           failureThreshold: {{ .Values.gateway.readinessFailureThreshold }}
           httpGet:
             path: /healthz/ready
-            port: {{ .Values.global.proxy.statusPort }}
+            port: 15021
             scheme: HTTP
           initialDelaySeconds: {{ .Values.gateway.readinessInitialDelaySeconds }}
           periodSeconds: {{ .Values.gateway.readinessPeriodSeconds }}
@@ -206,11 +203,11 @@ template:
         - mountPath: /opt/plugins
           name: local-wasmplugins-volume
         {{- end }}
-        {{- if $promtailEnabled }}
+        {{- if $o11y.enabled }}
         - mountPath: /var/log/proxy
           name: log
         {{- end }}
-      {{- if $promtailEnabled }}
+      {{- if $o11y.enabled }}
         {{- $config := $o11y.promtail }}
       - name: promtail
         image: {{ $config.image.repository | default (printf "%s/higress/promtail" .Values.global.hub) }}:{{ $config.image.tag }}
@@ -298,14 +295,14 @@ template:
       emptyDir: {}
     - name: proxy-socket
       emptyDir: {}
-    {{- if $promtailEnabled }}
+    {{- if $o11y.enabled }}
     - name: log
       emptyDir: {}
     - name: tmp
       emptyDir: {}
     - name: promtail-config
       configMap:
-        name: aigateway-promtail
+        name: higress-promtail
     {{- end }}
     - name: podinfo
       downwardAPI:

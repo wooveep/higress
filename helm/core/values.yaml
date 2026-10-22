@@ -1,80 +1,4 @@
 revision: ""
-
-mcpServer: {}
-
-mysql:
-  mysql:
-    enabled: false
-    name: ""
-    repository: mariadb
-    tag: "11.4"
-    pullPolicy: IfNotPresent
-    port: 3306
-  auth:
-    existingSecret: ""
-    username: portal
-    password: portal
-    database: aigateway_portal
-    rootPassword: root
-    usernameKey: username
-    passwordKey: password
-    databaseKey: database
-    rootPasswordKey: root-password
-  primary:
-    persistence:
-      enabled: true
-      storageClass: ""
-      size: 10Gi
-  podAnnotations: {}
-  podSecurityContext: {}
-  securityContext: {}
-  resources: {}
-  nodeSelector: {}
-  affinity: {}
-  tolerations: []
-
-postgresql:
-  enabled: false
-  fullnameOverride: ""
-  global:
-    imageRegistry: ""
-  postgresql:
-    username: portal
-    password: portal
-    database: aigateway_portal
-    postgresPassword: postgres
-    replicaCount: 3
-    pdb:
-      create: true
-      minAvailable: 1
-    image:
-      registry: docker.io
-      repository: bitnamilegacy/postgresql-repmgr
-      tag: 17.6.0-debian-12-r2
-      pullPolicy: IfNotPresent
-    affinity: {}
-    nodeSelector: {}
-    tolerations: []
-    initdbScripts:
-      00-enable-vector.sql: |
-        CREATE EXTENSION IF NOT EXISTS vector;
-    persistence:
-      enabled: true
-      size: 10Gi
-  pgpool:
-    replicaCount: 2
-    pdb:
-      create: true
-      minAvailable: 1
-    image:
-      registry: docker.io
-      repository: bitnamilegacy/pgpool
-      tag: 4.6.3-debian-12-r0
-      pullPolicy: IfNotPresent
-    affinity: {}
-    nodeSelector: {}
-    tolerations: []
-
 global:
   enableH3: false
   enableIPv6: false
@@ -94,13 +18,13 @@ global:
   hostRDSMergeSubset: false
   onlyPushRouteCluster: true
   # -- IngressClass filters which ingress resources the higress controller watches.
-  # The default ingress class is aigateway.
+  # The default ingress class is higress.
   # There are some special cases for special ingress class.
   # 1. When the ingress class is set as nginx, the higress controller will watch ingress
   # resources with the nginx ingress class or without any ingress class.
   # 2. When the ingress class is set empty, the higress controller will watch all ingress
   # resources in the k8s cluster.
-  ingressClass: "aigateway"
+  ingressClass: "higress"
   # -- Whether to create the IngressClass resource for global.ingressClass.
   # Set this to false when reusing an existing IngressClass, for example during Nginx Ingress migration.
   createIngressClass: true
@@ -457,7 +381,6 @@ global:
   o11y:
     enabled: false
     promtail:
-      enabled: true
       image:
         repository: "" # Will use global.hub if not set
         tag: 2.9.4
@@ -507,11 +430,9 @@ meshConfig:
   # No hurry to do this in 1.6, we're trying to prove the code.
 
 gateway:
-  name: "aigateway-gateway"
+  name: "higress-gateway"
   # -- Number of Higress Gateway pods
   replicas: 2
-  # -- Full image repository for the gateway container. If set, it overrides hub/image.
-  repository: ""
   image: gateway
 
   # -- Specify image pull policy if default behavior isn't desired.
@@ -560,8 +481,6 @@ gateway:
   httpPort: 80
   httpsPort: 443
   hostNetwork: false
-  hostPort:
-    enabled: false
 
   # -- Labels to apply to all resources
   labels: {}
@@ -629,10 +548,6 @@ gateway:
 
   topologySpreadConstraints: []
 
-  pdb:
-    enabled: false
-    minAvailable: 1
-
   # -- If specified, the gateway will act as a network gateway for the given network.
   networkGateway: ""
 
@@ -659,11 +574,9 @@ gateway:
     rawSpec: {}
 
 controller:
-  name: "aigateway-controller"
+  name: "higress-controller"
   # -- Number of Higress Controller pods
   replicas: 1
-  # -- Full image repository for the controller container. If set, it overrides hub/image.
-  repository: ""
   image: higress
 
   hub: "" # Will use global.hub if not set
@@ -748,10 +661,6 @@ controller:
 
   topologySpreadConstraints: []
 
-  pdb:
-    enabled: false
-    minAvailable: 1
-
   autoscaling:
     enabled: false
     minReplicas: 1
@@ -766,8 +675,7 @@ pilot:
   hub: "" # Will use global.hub if not set
   tag: ""
 
-  # -- Full image repository for pilot. If set, it overrides hub/image.
-  repository: ""
+  # -- Can be a full hub/image:tag
   image: pilot
   traceSampling: 1.0
 
@@ -853,68 +761,83 @@ gzip:
   compressionStrategy: "DEFAULT_STRATEGY"
 
 redis:
-  enabled: false
-  fullnameOverride: ""
-  global:
-    imageRegistry: ""
-  architecture: replication
-  auth:
-    enabled: true
-    sentinel: true
-    password: aigateway-redis
-    existingSecret: ""
-    existingSecretPasswordKey: password
-  image:
-    registry: docker.io
-    repository: bitnamilegacy/redis
-    tag: 8.0.3-debian-12-r2
-    pullPolicy: IfNotPresent
-  sentinel:
-    enabled: true
-    image:
-      registry: docker.io
-      repository: bitnamilegacy/redis-sentinel
-      tag: 8.0.3-debian-12-r2
-      pullPolicy: IfNotPresent
-    masterService:
-      enabled: true
+  redis:
+    name: redis-stack-server
+    # -- Specify the image
+    image: "redis-stack-server"
+    # -- Specify the tag
+    tag: "7.4.0-v3"
+    # -- Specify the number of replicas
+    replicas: 1
+    # -- Specify the password, if not set, no password is used
+    password: ""
+    # -- Service parameters
     service:
-      ports:
-        redis: 6379
-        sentinel: 26379
-  rbac:
-    create: true
-  serviceAccount:
-    create: true
-    automountServiceAccountToken: true
-  metrics:
-    enabled: false
-  master:
-    count: 1
-    persistence:
-      enabled: true
-      size: 1Gi
+      # -- Exporter service type
+      type: ClusterIP
+      # -- Exporter service port
+      port: 6379
+    # -- Specify the resources
     resources: {}
+    # -- NodeSelector Node labels for Redis
     nodeSelector: {}
+    # -- Tolerations for Redis
     tolerations: []
+    # -- Affinity for Redis
     affinity: {}
-  replica:
-    replicaCount: 2
-    automountServiceAccountToken: true
     persistence:
-      enabled: true
+      # -- Enable persistence on Redis. When enabled, a PVC is mounted at /data.
+      # The `dir /data` directive is written only when aof.enabled or rdb.enabled is true;
+      # if both are disabled, persistence must be driven via extraConfig (add `dir /data` there yourself).
+      enabled: false
+      # -- If defined, storageClassName: <storageClass>
+      # -- If undefined (the default) or set to null, no storageClassName spec is set, choosing the default provisioner
+      storageClass: ""
+      # -- Persistent Volume access modes
+      accessModes:
+        - ReadWriteOnce
+      # -- Persistent Volume size
       size: 1Gi
-    resources: {}
-    nodeSelector: {}
-    tolerations: []
-    affinity: {}
+    # -- AOF (Append-Only File) persistence settings. Only effective when persistence.enabled=true.
+    # AOF logs every write operation, providing best durability (up to 1s data loss with everysec).
+    # Redis prefers AOF for recovery when both AOF and RDB are enabled.
+    aof:
+      # -- Enable AOF persistence. Default is false (opt-in). Set to true to enable AOF persistence.
+      enabled: false
+      # -- AOF fsync policy: always, everysec, or no.
+      # "everysec" balances durability (≤1s data loss) and performance. See https://redis.io/docs/management/persistence/
+      fsync: everysec
+      # -- Rewrite AOF when size exceeds this percentage of base file. Default 100 = 2x size.
+      rewritePercentage: 100
+      # -- Minimum AOF file size to trigger rewrite. Default 64mb prevents frequent rewrites.
+      rewriteMinSize: 64mb
+    # -- RDB (Redis Database) snapshot persistence settings. Only effective when persistence.enabled=true.
+    # RDB provides compact point-in-time snapshots, useful for backups and faster restart.
+    # Can be enabled alongside AOF for dual persistence strategy.
+    rdb:
+      # -- Enable RDB snapshots. Default is false (opt-in). Set to true to enable RDB snapshots.
+      enabled: false
+      # -- RDB snapshot schedule as "seconds changes" pairs. Redis saves when ANY rule is matched.
+      # Only takes effect when rdb.enabled=true. Common defaults: "900 1" (15min/1 key),
+      # "300 10" (5min/10 keys), "60 10000" (1min/10000 keys).
+      # Set to empty list [] to disable RDB snapshots (renders `save ""`).
+      # See https://redis.io/docs/management/persistence/
+      save:
+        - "900 1"
+        - "300 10"
+        - "60 10000"
+    # -- Extra redis-stack.conf directives appended after the generated config
+    # (requirepass, and AOF defaults when persistence is enabled).
+    # Directives here take precedence over generated defaults (Redis applies the last value).
+    # Example:
+    #   maxmemory 512mb
+    #   maxmemory-policy allkeys-lru
+    extraConfig: ""
 
 pluginServer:
-  name: "aigateway-plugin-server"
+  name: "higress-plugin-server"
   # -- Number of Higress Plugin Server pods, 2 recommended for high availability
   replicas: 2
-  # -- Full image repository for plugin server. If set, it overrides hub/image.
-  repository: ""
   image: plugin-server
 
   hub: "" # Will use global.hub if not set
@@ -941,15 +864,3 @@ pluginServer:
     limits:
       cpu: 500m
       memory: 256Mi
-
-  nodeSelector: {}
-
-  tolerations: []
-
-  affinity: {}
-
-  topologySpreadConstraints: []
-
-  pdb:
-    enabled: false
-    minAvailable: 1

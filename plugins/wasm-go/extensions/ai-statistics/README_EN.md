@@ -10,10 +10,8 @@ Provides basic AI observability capabilities, including metric, log, and trace. 
 
 ## Runtime Properties
 
-Plugin Phase: `Stats Phase`
-Plugin Priority: `900`
-
-Recommended order: run after `model-router` and before `ai-data-masking` so model routing is settled before request behavior is recorded.
+Plugin Phase: `CUSTOM`
+Plugin Priority: `200`
 
 ## Configuration instructions
 
@@ -86,28 +84,6 @@ When using built-in attributes, you only need to set `key`, `apply_to_log`, etc.
 - `reasoning_tokens` and `cached_tokens` are convenience fields extracted from token details, applicable to OpenAI Chat Completions API
 - `input_token_details` and `output_token_details` will record the complete token details object as a JSON string
 
-### Detailed Usage Normalization
-
-The plugin normalizes Anthropic, OpenAI, Gemini, and other upstream usage formats into one internal schema and writes the result into metrics, `ai_log`, and spans. The added detailed fields are:
-
-- `cache_creation_input_tokens`
-- `cache_creation_5m_input_tokens`
-- `cache_creation_1h_input_tokens`
-- `cache_read_input_tokens`
-- `input_image_tokens`
-- `output_image_tokens`
-- `input_image_count`
-- `output_image_count`
-- `request_count`
-- `cache_ttl`
-
-Highlights:
-
-- Claude SSE responses merge `message_start` and `message_delta`
-- OpenAI `input_token_details.cached_tokens` is normalized into `cache_read_input_tokens`
-- Gemini splits image tokens from `promptTokensDetails` / `candidatesTokensDetails` and subtracts `cachedContentTokenCount`
-- When a provider only returns aggregate `cache_creation_input_tokens`, request-side TTL hints are used to place the remainder into the `5m` or `1h` cache bucket
-
 ## Configuration example
 
 If you want to record ai-statistic related statistical values in the gateway access log, you need to modify log_format and add a new field based on the original log_format. The example is as follows:
@@ -174,12 +150,6 @@ irate(route_upstream_model_consumer_metric_llm_service_duration[2m])
 /
 irate(route_upstream_model_consumer_metric_llm_duration_count[2m])
 ```
-
-#### AI Dashboard data semantics
-
-- Token cards and trend charts in `/ai/dashboard` continue to consume the Prometheus counters exported by this plugin, including `route_upstream_model_consumer_metric_total_token`, `input_token`, and the detailed cache/image token metrics.
-- Failed requests, slow requests, and estimated cost in `/ai/dashboard` come from the Console-side `billing_usage_event` aggregation so the dashboard can show request-level anomaly and billing views.
-- This dashboard refactor does not change the token extraction logic, metric names, or Redis/quota-related runtime behavior of `ai-statistics`.
 
 #### Log
 

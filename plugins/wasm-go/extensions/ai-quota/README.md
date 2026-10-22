@@ -6,18 +6,9 @@ description: AI 配额管理插件配置参考
 
 ## 功能说明
 
-`ai-quota` 插件支持两种工作模式：
+`ai-quota` 插件实现给特定 consumer 根据分配固定的 quota 进行 quota 策略限流，同时支持 quota 管理能力，包括查询 quota 、刷新 quota、增减 quota。
 
-- `token`：兼容旧模式，直接对 Redis 中的 token 配额做准入和扣减。
-- `amount`：金额模式。请求开始时校验用户余额和模型价格，请求结束后按真实 `input/output token` 计算金额扣减，并把消费事件写入 Redis Stream，供后端持久化到账本。
-
-插件需要配合 `key-auth`、`jwt-auth` 等认证插件获取 consumer 名称；在金额模式下不再依赖 `ai-statistics` 作为主账务来源，真实消费会直接按请求写入事件流。
-
-`amount` 模式下的日/周/月自然窗口统一按 `UTC` 计算：
-
-- 日窗口在上海时区的次日 `00:00` 重置
-- 周窗口以周一 `00:00` 为起点
-- 月窗口以下月 1 日 `00:00` 为起点
+`ai-quota` 插件需要配合 认证插件比如 `key-auth`、`jwt-auth` 等插件获取认证身份的 consumer 名称，同时需要配合 `ai-statistics` 插件获取 AI Token 统计信息。
 
 ## 运行属性
 
@@ -26,18 +17,13 @@ description: AI 配额管理插件配置参考
 
 ## 配置说明
 
-| 名称 | 数据类型 | 填写要求 | 默认值 | 描述 |
-| --- | --- | --- | --- | --- |
-| `quota_unit` | string | 选填 | `token` | 配额单位，支持 `token` 或 `amount` |
-| `redis_key_prefix` | string | 选填 | `chat_quota:` | `token` 模式下的 quota Redis key 前缀 |
-| `balance_key_prefix` | string | 选填 | `billing:balance:` | `amount` 模式下的用户余额 Redis key 前缀 |
-| `price_key_prefix` | string | 选填 | `billing:model-price:` | `amount` 模式下的模型价格 Redis Hash 前缀 |
-| `usage_event_stream` | string | 选填 | `billing:usage:stream` | `amount` 模式下的消费事件 Stream |
-| `usage_event_dedup_prefix` | string | 选填 | `billing:usage:event:` | `amount` 模式下的事件去重 key 前缀 |
-| `admin_consumer` | string | 必填 | - | 管理 quota 接口身份的 consumer 名称 |
-| `admin_path` | string | 选填 | `/quota` | 管理 quota 请求 path 前缀 |
-| `redis` | object | 必填 | - | Redis 相关配置 |
-| `enable_path_suffixes` | []string     | 选填                                   |  ["/v1/chat/completions", "/v1/messages", "/v1/completions", "/v1/responses", "/v1/embeddings", "/v1/images/generations"] | 启用配额校验的请求路径后缀（仅用于 completion 请求，不影响管理接口路径） |
+| 名称                 | 数据类型            | 填写要求                                 | 默认值 | 描述                                         |
+|--------------------|-----------------|--------------------------------------| ---- |--------------------------------------------|
+| `redis_key_prefix` | string          |  选填                                     |   chat_quota:   | qutoa redis key 前缀                         |
+| `admin_consumer`   | string          | 必填                                   |      | 管理 quota 管理身份的 consumer 名称                 |
+| `admin_path`       | string          | 选填                                   |   /quota   | 管理 quota 请求 path 前缀                        |
+| `enable_path_suffixes` | []string     | 选填                                   |  ["/v1/chat/completions", "/v1/messages"] | 启用配额校验的请求路径后缀（仅用于 completion 请求，不影响管理接口路径） |
+| `redis`            | object          | 是                                    |      | redis相关配置                                  |
 
 `redis`中每一项的配置字段说明
 
@@ -53,59 +39,8 @@ description: AI 配额管理插件配置参考
 
 ## 配置示例
 
-### 金额模式
+### 识别请求参数 apikey，进行区别限流
 ```yaml
-quota_unit: amount
-balance_key_prefix: "billing:balance:"
-price_key_prefix: "billing:model-price:"
-usage_event_stream: "billing:usage:stream"
-admin_consumer: consumer3
-admin_path: /quota
-redis:
-  service_name: redis-service.default.svc.cluster.local
-  service_port: 6379
-  timeout: 2000
-```
-
-金额模式下：
-
-- 请求开始时读取 `x-mse-consumer`、请求模型和用户余额。
-- 若模型没有有效价格或余额小于等于 0，会直接拒绝，并写入审计事件。
-- 请求成功结束后会按真实 token 用量计算 `micro_yuan` 扣减金额，并写入 Redis Stream。
-- 后端 billing consumer 再从 Stream 中落库到 PostgreSQL 账本。
-- 日/周/月金额窗口的 TTL 统一按 `UTC` 自然日历推导，而不是按部署机器本地时区。
-
-### 金额模式计费口径
-
-`amount` 模式会优先读取 `price_key_prefix + <provider>/<model>` 对应的 Redis Hash。该价格快照由 Portal 预先物化，已经包含 `ModelPriceData` 的回退结果，因此运行态不会再做浮点回退。
-
-当前会写入账务事件并参与扣费/聚合的 usage 维度包括：
-
-- `input_tokens`
-- `output_tokens`
-- `cache_creation_input_tokens`
-- `cache_creation_5m_input_tokens`
-- `cache_creation_1h_input_tokens`
-- `cache_read_input_tokens`
-- `input_image_tokens`
-- `output_image_tokens`
-- `input_image_count`
-- `output_image_count`
-- `request_count`
-
-金额计算会同时覆盖：
-
-- 文本输入/输出 token 单价
-- 缓存创建、缓存读取、`above_200k` 分级 token 单价
-- 输入/输出图像 token 单价
-- `input_cost_per_request`
-- `input_cost_per_image` / `output_cost_per_image`
-
-当上游只返回聚合 `cache_creation_input_tokens` 时，插件会优先使用请求侧 `cache_control.ttl` 或等价 `ttl` 把剩余 token 分配到 `5m/1h` 桶；若未提供 TTL，则默认归入 `5m`。
-
-### 兼容 token 模式
-```yaml
-quota_unit: token
 redis_key_prefix: "chat_quota:"
 admin_consumer: consumer3
 admin_path: /quota
@@ -121,9 +56,7 @@ redis:
 如果当前请求 url 的后缀符合 admin_path，例如插件在 example.com/v1/chat/completions 这个路由上生效，那么更新 quota 可以通过
 curl https://example.com/v1/chat/completions/quota/refresh -H "Authorization: Bearer credential3" -d "consumer=consumer1&quota=10000" 
 
-在 `token` 模式下，Redis 中 key 为 `chat_quota:consumer1` 的值会被刷新为 `10000`。
-
-在 `amount` 模式下，管理接口仍然直接写 `balance_key_prefix + consumer`，通常由控制面或后端投影器统一维护。
+Redis 中 key 为 chat_quota:consumer1 的值就会被刷新为 10000
 
 ### 查询 quota
 
@@ -134,3 +67,4 @@ curl https://example.com/v1/chat/completions/quota/refresh -H "Authorization: Be
 
 增减特定用户的 quota 可以通过 curl https://example.com/v1/chat/completions/quota/delta -d "consumer=consumer1&value=100" -H "Authorization: Bearer credential3"
 这样 Redis 中 Key 为 chat_quota:consumer1 的值就会增加100，可以支持负数，则减去对应值。
+

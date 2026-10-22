@@ -1,6 +1,6 @@
 apiVersion: v2
 appVersion: 2.2.5
-description: Helm chart for deploying AIGateway gateways
+description: Helm chart for deploying Higress gateways
 icon: https://higress.io/img/higress_logo_small.png
 home: http://higress.io/
 keywords:
@@ -8,20 +8,13 @@ keywords:
 - gateways
 name: higress
 sources:
-- http://github.com/alibaba/aigateway-group
+- http://github.com/alibaba/higress
 dependencies:
 - name: higress-core
   repository: "file://../core"
   version: 2.2.5
-  condition: higress-core.enabled
-- name: aigateway-console
-  alias: aigateway-console
-  repository: "file://../../../aigateway-console/helm"
-  version: 1.0.0
-  condition: aigateway-console.enabled
-- name: aigateway-portal
-  repository: "file://../../../aigateway-portal/helm"
-  version: 1.0.0
-  condition: aigateway-portal.enabled
+- name: higress-console
+  repository: "https://higress.io/helm-charts/"
+  version: 2.2.5
 type: application
-version: 1.0.0
+version: 2.2.5

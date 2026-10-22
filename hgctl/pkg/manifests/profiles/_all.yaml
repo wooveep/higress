@@ -4,7 +4,7 @@ global:
   ingressClass: higress
   enableIstioAPI: true
   enableGatewayAPI: false
-  namespace: aigateway-system
+  namespace: higress-system
 
 console:
   port: 8080
@@ -43,7 +43,7 @@ controller:
 
 storage:
   url: nacos://127.0.0.1:8848 #  file://opt/higress/conf
-  ns: aigateway-system
+  ns: higress-system
   username:
   password:
   dataEncKey:

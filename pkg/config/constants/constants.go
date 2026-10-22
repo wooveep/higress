@@ -14,9 +14,9 @@
 
 package constants
 
-const DefaultIngressClass = "aigateway"
+const DefaultIngressClass = "higress"
 
-const DefaultGatewayClass = "aigateway"
+const DefaultGatewayClass = "higress"
 
 const KnativeIngressCRDName = "ingresses.networking.internal.knative.dev"
 

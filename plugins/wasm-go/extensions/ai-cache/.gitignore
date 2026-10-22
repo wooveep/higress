@@ -7,7 +7,6 @@ docker-compose-test/
 !*.go
 !go.sum
 !go.mod
-!VERSION
 
 !LICENSE
 !*.md

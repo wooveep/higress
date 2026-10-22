@@ -62,7 +62,7 @@ test:
 
 install:
   # The namespace of the installation
-  namespace: aigateway-system
+  namespace: higress-system
   # Use to validate WASM plugin configuration when install by yaml
   spec-yaml: ./out/spec.yaml
   # Installation source. Choose between 'from-yaml' and 'from-go-project'

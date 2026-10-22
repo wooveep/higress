@@ -12,25 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::deny_word::{DenyWord, MatchResult, MatchRule, MatchType as DenyMatchType};
+use crate::deny_word::DenyWord;
 use crate::msg_win_openai::MsgWindow;
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, AhoCorasickKind, Input, MatchKind};
 use fancy_regex::Regex;
 use grok::patterns;
-use higress_wasm_rust::cluster_wrapper::{Cluster, K8sCluster};
 use higress_wasm_rust::log::Log;
 use higress_wasm_rust::plugin_wrapper::{HttpContextWrapper, RootContextWrapper};
-use higress_wasm_rust::request_wrapper::{get_request_path, has_request_body};
+use higress_wasm_rust::request_wrapper::has_request_body;
 use higress_wasm_rust::rule_matcher::{on_configure, RuleMatcher, SharedRuleMatcher};
-use http::Method;
 use jsonpath_rust::{JsonPath, JsonPathValue};
 use lazy_static::lazy_static;
-use multimap::MultiMap;
-use proxy_wasm::hostcalls;
 use proxy_wasm::traits::{Context, HttpContext, RootContext};
 use proxy_wasm::types::{Bytes, ContextType, DataAction, HeaderAction, LogLevel};
 use serde::de::Error;
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
+use serde::Deserializer;
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -38,7 +35,6 @@ use std::fmt::Write;
 use std::ops::DerefMut;
 use std::rc::{Rc, Weak};
 use std::str::FromStr;
-use std::time::Duration;
 use std::vec;
 
 proxy_wasm::main! {{
@@ -48,15 +44,12 @@ proxy_wasm::main! {{
 
 const PLUGIN_NAME: &str = "ai-data-masking";
 const GROK_PATTERN: &str = r"%\{(?<name>(?<pattern>[A-z0-9]+)(?::(?<alias>[A-z0-9_:;\/\s\.]+))?)\}";
-const REQUEST_PHASE: &str = "request";
-const RESPONSE_PHASE: &str = "response";
 
 struct System {
     deny_word: DenyWord,
     grok_regex: Regex,
     grok_patterns: BTreeMap<String, String>,
 }
-
 lazy_static! {
     static ref SYSTEM: System = System::new();
 }
@@ -65,34 +58,30 @@ struct AiDataMaskingRoot {
     log: Log,
     rule_matcher: SharedRuleMatcher<AiDataMaskingConfig>,
 }
-
 struct AiDataMasking {
     weak: Weak<RefCell<Box<dyn HttpContextWrapper<AiDataMaskingConfig>>>>,
-    config: Option<Rc<RuntimeAiDataMaskingConfig>>,
+    config: Option<Rc<AiDataMaskingConfig>>,
     mask_map: HashMap<String, RestoreEntry>,
     mask_restore: Option<MaskRestore>,
-    masking_error: Option<fancy_regex::Error>,
     is_openai: bool,
     is_openai_stream: Option<bool>,
     stream: bool,
-    request_block_audit_reported: bool,
     log: Log,
     msg_window: MsgWindow,
     char_window_size: usize,
     byte_window_size: usize,
 }
-
 fn deserialize_regexp<'de, D>(deserializer: D) -> Result<Regex, D::Error>
 where
     D: Deserializer<'de>,
 {
     let value: Value = Deserialize::deserialize(deserializer)?;
     if let Some(pattern) = value.as_str() {
-        let (expanded, _) = SYSTEM.grok_to_pattern(pattern);
-        if let Ok(regex) = Regex::new(&expanded) {
-            Ok(regex)
-        } else if let Ok(regex) = Regex::new(pattern) {
-            Ok(regex)
+        let (p, _) = SYSTEM.grok_to_pattern(pattern);
+        if let Ok(reg) = Regex::new(&p) {
+            Ok(reg)
+        } else if let Ok(reg) = Regex::new(pattern) {
+            Ok(reg)
         } else {
             Err(Error::custom(format!("regexp error field {}", pattern)))
         }
@@ -101,16 +90,16 @@ where
     }
 }
 
-fn deserialize_type<'de, D>(deserializer: D) -> Result<ReplaceType, D::Error>
+fn deserialize_type<'de, D>(deserializer: D) -> Result<Type, D::Error>
 where
     D: Deserializer<'de>,
 {
     let value: Value = Deserialize::deserialize(deserializer)?;
     if let Some(t) = value.as_str() {
         if t == "replace" {
-            Ok(ReplaceType::Replace)
+            Ok(Type::Replace)
         } else if t == "hash" {
-            Ok(ReplaceType::Hash)
+            Ok(Type::Hash)
         } else {
             Err(Error::custom(format!("regexp error value {}", t)))
         }
@@ -119,16 +108,12 @@ where
     }
 }
 
-fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+fn deserialize_denyword<'de, D>(deserializer: D) -> Result<DenyWord, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let value: Option<Value> = Option::deserialize(deserializer)?;
-    Ok(match value {
-        None | Some(Value::Null) => None,
-        Some(Value::String(text)) => Some(text),
-        Some(other) => Some(other.to_string()),
-    })
+    let value: Vec<String> = Deserialize::deserialize(deserializer)?;
+    Ok(DenyWord::from_iter(value))
 }
 
 fn deserialize_jsonpath<'de, D>(deserializer: D) -> Result<Vec<JsonPath>, D::Error>
@@ -137,168 +122,34 @@ where
 {
     let value: Vec<String> = Deserialize::deserialize(deserializer)?;
     let mut ret = Vec::new();
-    for item in value {
-        if item.is_empty() {
+    for v in value {
+        if v.is_empty() {
             continue;
         }
-        match JsonPath::from_str(&item) {
-            Ok(jsonpath) => ret.push(jsonpath),
-            Err(_) => return Err(Error::custom(format!("jsonpath error value {}", item))),
+        match JsonPath::from_str(&v) {
+            Ok(jp) => ret.push(jp),
+            Err(_) => return Err(Error::custom(format!("jsonpath error value {}", v))),
         }
     }
     Ok(ret)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ReplaceType {
+enum Type {
     Replace,
     Hash,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-struct ReplaceRule {
-    #[allow(dead_code)]
-    #[serde(default, deserialize_with = "deserialize_optional_string")]
-    id: Option<String>,
-    #[serde(
-        alias = "pattern",
-        alias = "regex",
-        deserialize_with = "deserialize_regexp"
-    )]
+struct Rule {
+    #[serde(deserialize_with = "deserialize_regexp")]
     regex: Regex,
-    #[serde(
-        alias = "replace_type",
-        alias = "type",
-        deserialize_with = "deserialize_type"
-    )]
-    type_: ReplaceType,
+    #[serde(deserialize_with = "deserialize_type", alias = "type")]
+    type_: Type,
     #[serde(default)]
     restore: bool,
-    #[serde(default, alias = "replace_value")]
+    #[serde(default)]
     value: String,
-    #[allow(dead_code)]
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    priority: i32,
-    #[serde(default = "default_true")]
-    enabled: bool,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-struct DenyRule {
-    #[serde(default, deserialize_with = "deserialize_optional_string")]
-    id: Option<String>,
-    pattern: String,
-    #[serde(default = "default_match_type")]
-    match_type: String,
-    #[allow(dead_code)]
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    priority: i32,
-    #[serde(default = "default_true")]
-    enabled: bool,
-}
-
-impl DenyRule {
-    fn to_match_rule(&self) -> Result<MatchRule, String> {
-        let pattern = self.pattern.trim();
-        if pattern.is_empty() {
-            return Err("pattern is empty".to_string());
-        }
-        let rule_id = self.id.clone();
-        let priority = self.priority;
-        let enabled = self.enabled;
-        match self.match_type.to_lowercase().as_str() {
-            "contains" => {
-                let regex = Regex::new(&format!("(?i:{})", regex_escape(pattern)))
-                    .map_err(|err| err.to_string())?;
-                Ok(MatchRule::new(
-                    rule_id,
-                    pattern.to_string(),
-                    DenyMatchType::Contains,
-                    priority,
-                    enabled,
-                    Some(regex),
-                ))
-            }
-            "exact" => Ok(MatchRule::new(
-                rule_id,
-                pattern.to_string(),
-                DenyMatchType::Exact,
-                priority,
-                enabled,
-                None,
-            )),
-            "regex" => {
-                let (expanded, _) = SYSTEM.grok_to_pattern(pattern);
-                let regex =
-                    Regex::new(&format!("(?i:{})", expanded)).map_err(|err| err.to_string())?;
-                Ok(MatchRule::new(
-                    rule_id,
-                    pattern.to_string(),
-                    DenyMatchType::Regex,
-                    priority,
-                    enabled,
-                    Some(regex),
-                ))
-            }
-            other => Err(format!("unsupported match_type {}", other)),
-        }
-    }
-}
-
-#[derive(Default, Debug, Deserialize, Clone)]
-struct AuditSinkConfig {
-    #[serde(default)]
-    service_name: String,
-    #[serde(default)]
-    namespace: String,
-    #[serde(default)]
-    port: u16,
-    #[serde(default)]
-    path: String,
-    #[serde(default)]
-    timeout_ms: u64,
-}
-
-impl AuditSinkConfig {
-    fn is_enabled(&self) -> bool {
-        !self.service_name.trim().is_empty() && self.port > 0
-    }
-
-    fn cluster(&self) -> K8sCluster {
-        let namespace = if self.namespace.trim().is_empty() {
-            "default"
-        } else {
-            self.namespace.trim()
-        };
-        K8sCluster::new(
-            self.service_name.trim(),
-            namespace,
-            &self.port.to_string(),
-            "",
-            "",
-        )
-    }
-
-    fn url(&self) -> String {
-        let path = if self.path.starts_with('/') {
-            self.path.clone()
-        } else {
-            format!("/{}", self.path)
-        };
-        format!("http://{}{}", self.cluster().host_name(), path)
-    }
-
-    fn timeout(&self) -> Duration {
-        Duration::from_millis(if self.timeout_ms == 0 {
-            2000
-        } else {
-            self.timeout_ms
-        })
-    }
 }
 
 struct MaskRestore {
@@ -535,7 +386,7 @@ fn record_restore_mapping(
 }
 
 fn replace_rule_message(
-    rule: &ReplaceRule,
+    rule: &Rule,
     message: &str,
     mask_map: &mut HashMap<String, RestoreEntry>,
     byte_window_size: &mut usize,
@@ -552,28 +403,26 @@ fn replace_rule_message(
 
         let original = matched.as_str();
         let masked = match rule.type_ {
-            ReplaceType::Hash => {
+            Type::Hash => {
                 let digest = hmac_sha256::Hash::hash(original.as_bytes());
                 digest.iter().fold(String::new(), |mut output, byte| {
                     let _ = write!(output, "{byte:02x}");
                     output
                 })
             }
-            ReplaceType::Replace => {
-                mask_numeric_middle(original, &rule.value).unwrap_or_else(|| {
-                    let mut expanded = String::new();
-                    captures.expand(&rule.value, &mut expanded);
-                    expanded
-                })
+            Type::Replace => {
+                let mut expanded = String::new();
+                captures.expand(&rule.value, &mut expanded);
+                expanded
             }
         };
 
-        if rule.type_ == ReplaceType::Hash || rule.restore {
+        if rule.type_ == Type::Hash || rule.restore {
             *byte_window_size = (*byte_window_size).max(masked.len());
             *char_window_size = (*char_window_size).max(masked.chars().count());
         }
         if rule.restore && !masked.is_empty() {
-            let kind = if rule.type_ == ReplaceType::Hash {
+            let kind = if rule.type_ == Type::Hash {
                 RestoreKind::Hash
             } else {
                 RestoreKind::General
@@ -595,39 +444,24 @@ fn replace_rule_message(
 fn default_deny_openai() -> bool {
     true
 }
-
 fn default_deny_raw() -> bool {
     false
 }
-
 fn default_system_deny() -> bool {
     false
 }
-
 fn default_deny_code() -> u16 {
     200
 }
-
 fn default_deny_content_type() -> String {
     "application/json".to_string()
 }
-
 fn default_deny_raw_message() -> String {
     "{\"errmsg\":\"提问或回答中包含敏感词，已被屏蔽\"}".to_string()
 }
-
 fn default_deny_message() -> String {
     "提问或回答中包含敏感词，已被屏蔽".to_string()
 }
-
-fn default_match_type() -> String {
-    "contains".to_string()
-}
-
-fn default_true() -> bool {
-    true
-}
-
 #[derive(Default, Debug, Deserialize, Clone)]
 pub struct AiDataMaskingConfig {
     #[serde(default = "default_deny_openai")]
@@ -638,8 +472,6 @@ pub struct AiDataMaskingConfig {
     deny_jsonpath: Vec<JsonPath>,
     #[serde(default = "default_system_deny")]
     system_deny: bool,
-    #[serde(default)]
-    system_deny_words: Option<Vec<String>>,
     #[serde(default = "default_deny_code")]
     deny_code: u16,
     #[serde(default = "default_deny_message")]
@@ -649,111 +481,55 @@ pub struct AiDataMaskingConfig {
     #[serde(default = "default_deny_content_type")]
     deny_content_type: String,
     #[serde(default)]
-    replace_roles: Vec<ReplaceRule>,
-    #[serde(default)]
-    replace_rules: Vec<ReplaceRule>,
-    #[serde(default)]
-    deny_words: Vec<String>,
-    #[serde(default)]
-    deny_rules: Vec<DenyRule>,
-    #[serde(default)]
-    audit_sink: Option<AuditSinkConfig>,
+    replace_roles: Vec<Rule>,
+    #[serde(deserialize_with = "deserialize_denyword", default = "DenyWord::empty")]
+    deny_words: DenyWord,
 }
 
-#[derive(Debug, Clone)]
-struct RuntimeAiDataMaskingConfig {
-    deny_openai: bool,
-    deny_raw: bool,
-    deny_jsonpath: Vec<JsonPath>,
-    deny_code: u16,
-    deny_message: String,
-    deny_raw_message: String,
-    deny_content_type: String,
-    replace_rules: Vec<ReplaceRule>,
-    deny_matcher: DenyWord,
-    audit_sink: Option<AuditSinkConfig>,
-}
-
-impl RuntimeAiDataMaskingConfig {
-    fn from_config(raw: &AiDataMaskingConfig, log: &Log) -> Self {
-        let mut deny_matcher = DenyWord::empty();
-        let mut compiled_rules = Vec::new();
-        for rule in &raw.deny_rules {
-            match rule.to_match_rule() {
-                Ok(compiled) => compiled_rules.push(compiled),
-                Err(err) => log.warn(&format!(
-                    "skip invalid deny rule pattern={}, reason={}",
-                    rule.pattern, err
-                )),
-            }
-        }
-        for word in &raw.deny_words {
-            let pattern = word.trim();
-            if pattern.is_empty() {
-                continue;
-            }
-            match Regex::new(&format!("(?i:{})", regex_escape(pattern))) {
-                Ok(regex) => compiled_rules.push(MatchRule::new(
-                    None,
-                    pattern.to_string(),
-                    DenyMatchType::Contains,
-                    0,
-                    true,
-                    Some(regex),
-                )),
-                Err(err) => log.warn(&format!(
-                    "skip invalid legacy deny word pattern={}, reason={}",
-                    pattern, err
-                )),
-            }
-        }
-        deny_matcher.append(DenyWord::from_rules(compiled_rules));
-        if raw.system_deny {
-            match raw.system_deny_words.as_ref() {
-                Some(system_deny_words) => {
-                    let system_text = system_deny_words
-                        .iter()
-                        .map(|word| word.trim())
-                        .filter(|word| !word.is_empty())
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    deny_matcher.append(DenyWord::from_system_text(&system_text));
-                }
-                None => deny_matcher.append(SYSTEM.deny_word.clone()),
-            }
-        }
-
-        let mut replace_rules = raw.replace_rules.clone();
-        replace_rules.extend(raw.replace_roles.clone());
-        replace_rules.retain(|rule| rule.enabled);
-        replace_rules.sort_by(|left, right| right.priority.cmp(&left.priority));
-
-        RuntimeAiDataMaskingConfig {
-            deny_openai: raw.deny_openai,
-            deny_raw: raw.deny_raw,
-            deny_jsonpath: raw.deny_jsonpath.clone(),
-            deny_code: raw.deny_code,
-            deny_message: raw.deny_message.clone(),
-            deny_raw_message: raw.deny_raw_message.clone(),
-            deny_content_type: raw.deny_content_type.clone(),
-            replace_rules,
-            deny_matcher,
-            audit_sink: raw.audit_sink.clone(),
-        }
-    }
-
-    fn check_message(&self, message: &str, log: &Log) -> Option<MatchResult> {
-        if let Some(result) = self.deny_matcher.check(message) {
+impl AiDataMaskingConfig {
+    fn check_message(&self, message: &str, log: &Log) -> bool {
+        if let Some(word) = self.deny_words.check(message) {
             log.warn(&format!(
-                "deny rule pattern={} match_type={} matched_text={}",
-                result.pattern,
-                result.match_type.as_str(),
-                result.matched_text
+                "custom deny word {} matched from {}",
+                word, message
             ));
-            return Some(result);
+            return true;
+        } else if self.system_deny {
+            if let Some(word) = SYSTEM.deny_word.check(message) {
+                log.warn(&format!(
+                    "system deny word {} matched from {}",
+                    word, message
+                ));
+                return true;
+            }
         }
-        None
+        false
     }
+}
+#[derive(Debug, Deserialize, Clone)]
+struct Message {
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    reasoning_content: String,
+}
+#[derive(Debug, Deserialize, Clone)]
+struct Req {
+    #[serde(default)]
+    stream: bool,
+    messages: Vec<Message>,
+}
+
+#[derive(Default, Debug, Deserialize)]
+struct ResMessage {
+    #[serde(default)]
+    message: Option<Message>,
+}
+
+#[derive(Default, Debug, Deserialize)]
+struct Res {
+    #[serde(default)]
+    choices: Vec<ResMessage>,
 }
 
 static SYSTEM_PATTERNS: &[(&str, &str)] = &[
@@ -773,12 +549,11 @@ impl System {
         system.init();
         system
     }
-
     fn init(&mut self) {
         let mut grok_temp_patterns = VecDeque::new();
-        for pattern_group in [patterns(), SYSTEM_PATTERNS] {
-            for &(key, value) in pattern_group {
-                if self.grok_regex.is_match(value).is_ok_and(|matched| matched) {
+        for patterns in [patterns(), SYSTEM_PATTERNS] {
+            for &(key, value) in patterns {
+                if self.grok_regex.is_match(value).is_ok_and(|r| r) {
                     grok_temp_patterns.push_back((String::from(key), String::from(value)));
                 } else {
                     self.grok_patterns
@@ -787,25 +562,25 @@ impl System {
             }
         }
         let mut last_ok: Option<String> = None;
+
         while let Some((key, value)) = grok_temp_patterns.pop_front() {
-            if let Some(last_key) = &last_ok {
-                if last_key == &key {
+            if let Some(k) = &last_ok {
+                if k == &key {
                     break;
                 }
             }
-            let (expanded, ok) = self.grok_to_pattern(&value);
+            let (v, ok) = self.grok_to_pattern(&value);
             if ok {
-                self.grok_patterns.insert(key, expanded);
+                self.grok_patterns.insert(key, v);
                 last_ok = None;
             } else {
                 if last_ok.is_none() {
                     last_ok = Some(key.clone());
                 }
-                grok_temp_patterns.push_back((key, expanded));
+                grok_temp_patterns.push_back((key, v));
             }
         }
     }
-
     fn grok_to_pattern(&self, pattern: &str) -> (String, bool) {
         let mut ok = true;
         let mut ret = pattern.to_string();
@@ -814,14 +589,13 @@ impl System {
                 ok = false;
                 continue;
             }
-            let capture = capture.unwrap();
-            if let (Some(full), Some(name)) = (capture.get(0), capture.name("pattern")) {
-                if let Some(found) = self.grok_patterns.get(name.as_str()) {
-                    if let Some(alias) = capture.name("alias") {
-                        ret = ret
-                            .replace(full.as_str(), &format!("(?P<{}>{})", alias.as_str(), found));
+            let c = capture.unwrap();
+            if let (Some(full), Some(name)) = (c.get(0), c.name("pattern")) {
+                if let Some(p) = self.grok_patterns.get(name.as_str()) {
+                    if let Some(alias) = c.name("alias") {
+                        ret = ret.replace(full.as_str(), &format!("(?P<{}>{})", alias.as_str(), p));
                     } else {
-                        ret = ret.replace(full.as_str(), found);
+                        ret = ret.replace(full.as_str(), p);
                     }
                 } else {
                     ok = false;
@@ -852,11 +626,9 @@ impl RootContext for AiDataMaskingRoot {
             &self.log,
         )
     }
-
     fn create_http_context(&self, context_id: u32) -> Option<Box<dyn HttpContext>> {
         self.create_http_context_use_wrapper(context_id)
     }
-
     fn get_type(&self) -> Option<ContextType> {
         Some(ContextType::HttpContext)
     }
@@ -875,12 +647,10 @@ impl RootContextWrapper<AiDataMaskingConfig> for AiDataMaskingRoot {
             weak: Weak::default(),
             mask_map: HashMap::new(),
             mask_restore: None,
-            masking_error: None,
             config: None,
             is_openai: false,
             is_openai_stream: None,
             stream: false,
-            request_block_audit_reported: false,
             msg_window: MsgWindow::default(),
             log: Log::new(PLUGIN_NAME.to_string()),
             char_window_size: 0,
@@ -890,12 +660,13 @@ impl RootContextWrapper<AiDataMaskingConfig> for AiDataMaskingRoot {
 }
 
 impl AiDataMasking {
-    fn check_message(&self, message: &str) -> Option<MatchResult> {
-        self.config
-            .as_ref()
-            .and_then(|config| config.check_message(message, self.log()))
+    fn check_message(&self, message: &str) -> bool {
+        if let Some(config) = &self.config {
+            config.check_message(message, self.log())
+        } else {
+            false
+        }
     }
-
     fn msg_to_response(&self, msg: &str, raw_msg: &str, content_type: &str) -> (String, String) {
         if !self.is_openai {
             (raw_msg.to_string(), content_type.to_string())
@@ -909,21 +680,15 @@ impl AiDataMasking {
             )
         } else {
             (
-                json!({"choices": [{"index": 0, "message": {"role": "assistant", "content": msg}}], "usage": {}})
-                    .to_string(),
-                "application/json".to_string(),
+                json!({"choices": [{"index": 0, "message": {"role": "assistant", "content": msg}}], "usage": {}}).to_string(),
+                 "application/json".to_string()
             )
         }
     }
-
-    fn deny(
-        &mut self,
-        in_response: bool,
-        match_result: Option<&MatchResult>,
-        request_phase: &str,
-    ) -> DataAction {
-        if self.should_report_block_audit(request_phase) {
-            self.report_block_audit(match_result, request_phase);
+    fn deny(&mut self, in_response: bool) -> DataAction {
+        if in_response && self.stream {
+            self.replace_http_response_body(&[]);
+            return DataAction::Continue;
         }
         let (deny_code, (deny_message, content_type)) = if let Some(config) = &self.config {
             (
@@ -956,33 +721,20 @@ impl AiDataMasking {
         DataAction::StopIterationAndBuffer
     }
 
-    fn replace_request_msg(&mut self, message: &str) -> String {
-        if self.masking_error.is_some() {
-            return message.to_string();
-        }
-        let replace_rules = match &self.config {
-            Some(config) => config.replace_rules.clone(),
-            None => return message.to_string(),
-        };
+    fn replace_request_msg(&mut self, message: &str) -> Result<String, fancy_regex::Error> {
+        let config = self.config.as_ref().unwrap();
         let mut msg = message.to_string();
         let mut match_count = 0;
-        for rule in &replace_rules {
-            match replace_rule_message(
+        for rule in &config.replace_roles {
+            let (new_msg, rule_match_count) = replace_rule_message(
                 rule,
                 &msg,
                 &mut self.mask_map,
                 &mut self.byte_window_size,
                 &mut self.char_window_size,
-            ) {
-                Ok((replaced, count)) => {
-                    msg = replaced;
-                    match_count += count;
-                }
-                Err(error) => {
-                    self.masking_error = Some(error);
-                    return message.to_string();
-                }
-            }
+            )?;
+            msg = new_msg;
+            match_count += rule_match_count;
         }
         if msg != message {
             self.log().debug(&format!(
@@ -992,15 +744,10 @@ impl AiDataMasking {
                 match_count
             ));
         }
-        msg
+        Ok(msg)
     }
 
     fn forward_request_body(&mut self, body: &str) -> DataAction {
-        if let Some(error) = self.masking_error.take() {
-            self.log()
-                .error(&format!("request masking regex failed: {}", error));
-            return self.deny(false, None, REQUEST_PHASE);
-        }
         match MaskRestore::from_map(std::mem::take(&mut self.mask_map)) {
             Ok(mask_restore) => self.mask_restore = mask_restore,
             Err(error) => {
@@ -1008,315 +755,17 @@ impl AiDataMasking {
                     "failed to build response restore matcher: {}",
                     error
                 ));
-                return self.deny(false, None, REQUEST_PHASE);
+                return self.deny(false);
             }
         }
         self.replace_http_request_body(body.as_bytes());
         DataAction::Continue
     }
 
-    fn restore_response_msg(&self, message: &str) -> String {
-        match &self.mask_restore {
-            Some(mask_restore) => mask_restore.restore(message),
-            None => message.to_string(),
-        }
-    }
-
-    fn process_request_string(&mut self, content: &mut String) -> Option<MatchResult> {
-        if let Some(match_result) = self.check_message(content) {
-            return Some(match_result);
-        }
-        let new_content = self.replace_request_msg(content);
-        if new_content != *content {
-            *content = new_content;
-        }
-        None
-    }
-
-    fn process_response_string(&mut self, content: &mut String) -> Option<MatchResult> {
-        let new_content = self.restore_response_msg(content);
-        if new_content != *content {
-            *content = new_content;
-        }
-        None
-    }
-
-    fn process_request_text_value(&mut self, value: &mut Value) -> Option<MatchResult> {
-        match value {
-            Value::String(content) => self.process_request_string(content),
-            Value::Array(items) => {
-                for item in items {
-                    if let Some(match_result) = self.process_request_text_value(item) {
-                        return Some(match_result);
-                    }
-                }
-                None
-            }
-            Value::Object(object) => {
-                for key in ["text", "input_text", "content", "reasoning_content"] {
-                    if let Some(item) = object.get_mut(key) {
-                        if let Some(match_result) = self.process_request_text_value(item) {
-                            return Some(match_result);
-                        }
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
-    fn process_response_text_value(&mut self, value: &mut Value) -> Option<MatchResult> {
-        match value {
-            Value::String(content) => self.process_response_string(content),
-            Value::Array(items) => {
-                for item in items {
-                    if let Some(match_result) = self.process_response_text_value(item) {
-                        return Some(match_result);
-                    }
-                }
-                None
-            }
-            Value::Object(object) => {
-                for key in ["text", "output_text", "content", "reasoning_content"] {
-                    if let Some(item) = object.get_mut(key) {
-                        if let Some(match_result) = self.process_response_text_value(item) {
-                            return Some(match_result);
-                        }
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
-    fn is_user_role(value: &Value) -> bool {
-        value
-            .get("role")
-            .and_then(Value::as_str)
-            .map(|role| role.eq_ignore_ascii_case("user"))
-            .unwrap_or(true)
-    }
-
-    fn is_input_turn_start(value: &Value) -> bool {
-        if !value.is_object() {
-            return true;
-        }
-        Self::is_user_role(value)
-    }
-
-    fn should_report_block_audit(&mut self, request_phase: &str) -> bool {
-        match request_phase {
-            REQUEST_PHASE => {
-                if self.request_block_audit_reported {
-                    false
-                } else {
-                    self.request_block_audit_reported = true;
-                    true
-                }
-            }
-            RESPONSE_PHASE => false,
-            _ => true,
-        }
-    }
-
-    fn process_openai_request_body(&mut self, value: &mut Value) -> Option<MatchResult> {
-        let object = match value.as_object_mut() {
-            Some(object) => object,
-            None => return None,
-        };
-        let has_openai_shape = object.contains_key("messages")
-            || object.contains_key("input")
-            || object.contains_key("system");
-        if !has_openai_shape {
-            return None;
-        }
-        self.is_openai = true;
-        self.stream = object
-            .get("stream")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-
-        if let Some(system) = object.get_mut("system") {
-            if let Some(match_result) = self.process_request_text_value(system) {
-                return Some(match_result);
-            }
-        }
-
-        if let Some(messages) = object.get_mut("messages").and_then(Value::as_array_mut) {
-            if let Some(match_result) = process_turns_with_history_cleanup(
-                messages,
-                Self::is_user_role,
-                |message| self.process_request_text_value(message),
-                |_| {},
-            ) {
-                return Some(match_result);
-            }
-        }
-
-        if let Some(input) = object.get_mut("input") {
-            match input {
-                Value::Array(items) => {
-                    if let Some(match_result) = process_turns_with_history_cleanup(
-                        items,
-                        Self::is_input_turn_start,
-                        |item| self.process_request_text_value(item),
-                        |_| {},
-                    ) {
-                        return Some(match_result);
-                    }
-                }
-                other => {
-                    if let Some(match_result) = self.process_request_text_value(other) {
-                        return Some(match_result);
-                    }
-                }
-            }
-        }
-
-        None
-    }
-
-    fn process_openai_response_body(&mut self, value: &mut Value) {
-        if let Some(choices) = value.get_mut("choices").and_then(Value::as_array_mut) {
-            for choice in choices {
-                if let Some(message) = choice.get_mut("message") {
-                    let _ = self.process_response_text_value(message);
-                }
-                if let Some(delta) = choice.get_mut("delta") {
-                    let _ = self.process_response_text_value(delta);
-                }
-            }
-        }
-    }
-
-    fn process_request_jsonpath(
-        &mut self,
-        json_value: &Value,
-        raw_body: &mut String,
-    ) -> Option<MatchResult> {
-        let jsonpaths = match &self.config {
-            Some(config) => config,
-            None => return None,
-        }
-        .deny_jsonpath
-        .clone();
-        for jsonpath in jsonpaths {
-            for value in jsonpath.find_slice(json_value) {
-                if let JsonPathValue::Slice(data, _) = value {
-                    if let Some(text) = data.as_str() {
-                        if let Some(match_result) = self.check_message(text) {
-                            return Some(match_result);
-                        }
-                        let content = text.to_string();
-                        let new_content = self.replace_request_msg(&content);
-                        if new_content != content {
-                            *raw_body = raw_body.replace(
-                                &Value::String(content).to_string(),
-                                &Value::String(new_content).to_string(),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    fn report_block_audit(&mut self, match_result: Option<&MatchResult>, request_phase: &str) {
-        let config = match &self.config {
-            Some(config) => config,
-            None => return,
-        };
-        let audit_sink = match &config.audit_sink {
-            Some(audit_sink) if audit_sink.is_enabled() => audit_sink.clone(),
-            _ => return,
-        };
-
-        let request_id = self
-            .get_http_request_header("x-request-id")
-            .or_else(|| self.get_http_request_header("x-envoy-request-id"))
-            .unwrap_or_default();
-        let consumer_name = self
-            .get_http_request_header("x-mse-consumer")
-            .or_else(|| self.get_http_request_header("X-Mse-Consumer"))
-            .unwrap_or_default();
-        let route_name = get_string_property(&["route_name"]).unwrap_or_default();
-
-        let blocked_reason = json!({
-            "blocked_by": "sensitive_word",
-            "request_phase": request_phase,
-            "route_name": route_name,
-            "consumer_name": consumer_name,
-            "match_type": match_result.map(|result| result.match_type.as_str()).unwrap_or_default(),
-            "matched_rule": match_result.map(|result| result.pattern.clone()).unwrap_or_default(),
-            "matched_excerpt": match_result.map(|result| result.excerpt.clone()).unwrap_or_default(),
-        })
-        .to_string();
-
-        let payload = json!({
-            "requestId": empty_to_null(&request_id),
-            "routeName": empty_to_null(&route_name),
-            "consumerName": empty_to_null(&consumer_name),
-            "blockedBy": "sensitive_word",
-            "requestPhase": request_phase,
-            "blockedReasonJson": blocked_reason,
-            "matchType": match_result.map(|result| result.match_type.as_str()),
-            "matchedRule": match_result.map(|result| result.pattern.clone()),
-            "matchedExcerpt": match_result.map(|result| result.excerpt.clone()),
-        })
-        .to_string();
-
-        let mut headers = MultiMap::new();
-        headers.insert("Content-Type".to_string(), "application/json".to_string());
-        let cluster = audit_sink.cluster();
-        let audit_url = audit_sink.url();
-        let cluster_name = cluster.cluster_name();
-        let callback_phase = request_phase.to_string();
-        let callback_request_id = request_id.clone();
-        let callback_cluster_name = cluster_name.clone();
-        let callback_audit_url = audit_url.clone();
-        if let Err(status) = self.http_call(
-            &cluster,
-            &Method::POST,
-            &audit_url,
-            headers,
-            Some(payload.as_bytes()),
-            Box::new(move |status_code, response_headers, response_body| {
-                if (200..300).contains(&status_code) {
-                    return;
-                }
-                let response_body = response_body
-                    .map(|body| String::from_utf8_lossy(&body).to_string())
-                    .unwrap_or_default();
-                let response_status = response_headers
-                    .get(":status")
-                    .cloned()
-                    .unwrap_or_default();
-                let log = Log::new(PLUGIN_NAME.to_string());
-                log.warn(&format!(
-                    "failed to report sensitive block audit, phase={}, request_id={}, cluster={}, url={}, http_status={}, header_status={}, body={}",
-                    callback_phase,
-                    callback_request_id,
-                    callback_cluster_name,
-                    callback_audit_url,
-                    status_code,
-                    response_status,
-                    response_body
-                ));
-            }),
-            audit_sink.timeout(),
-        ) {
-            self.log.warn(&format!(
-                "failed to dispatch sensitive block audit, phase={}, request_id={}, cluster={}, url={}, status={:?}",
-                request_phase,
-                request_id,
-                cluster_name,
-                audit_url,
-                status
-            ));
-        }
+    fn deny_request_masking_error(&mut self, error: &fancy_regex::Error) -> DataAction {
+        self.log()
+            .error(&format!("request masking regex failed: {}", error));
+        self.deny(false)
     }
 }
 
@@ -1335,7 +784,6 @@ impl HttpContext for AiDataMasking {
             HeaderAction::Continue
         }
     }
-
     fn on_http_response_headers(
         &mut self,
         _num_headers: usize,
@@ -1356,9 +804,17 @@ impl HttpContext for AiDataMasking {
                 }
                 self.msg_window
                     .push(&body, self.is_openai_stream.unwrap_or_default());
+                let mut deny = false;
+                let log = Log::new(PLUGIN_NAME.to_string());
                 let mask_restore = self.mask_restore.as_ref();
                 for message in self.msg_window.messages_iter_mut() {
                     if let Ok(mut msg) = String::from_utf8(message.clone()) {
+                        if let Some(config) = &self.config {
+                            if config.check_message(&msg, &log) {
+                                deny = true;
+                                break;
+                            }
+                        }
                         if let Some(mask_restore) = mask_restore {
                             msg = mask_restore.restore(&msg);
                         }
@@ -1366,16 +822,18 @@ impl HttpContext for AiDataMasking {
                         message.extend_from_slice(msg.as_bytes());
                     }
                 }
+                if deny {
+                    return self.deny(true);
+                }
             }
         }
         let new_body = if end_of_stream {
-            self.msg_window
-                .finish(self.is_openai_stream.unwrap_or_default())
+            self.msg_window.finish(self.is_openai_stream.unwrap())
         } else {
             self.msg_window.pop(
                 self.char_window_size * 2,
                 self.byte_window_size * 2,
-                self.is_openai_stream.unwrap_or_default(),
+                self.is_openai_stream.unwrap(),
             )
         };
         self.replace_http_response_body(&new_body);
@@ -1386,419 +844,185 @@ impl HttpContext for AiDataMasking {
 impl HttpContextWrapper<AiDataMaskingConfig> for AiDataMasking {
     fn init_self_weak(
         &mut self,
-        self_weak: Weak<RefCell<Box<dyn HttpContextWrapper<AiDataMaskingConfig>>>>,
+        self_weak: std::rc::Weak<RefCell<Box<dyn HttpContextWrapper<AiDataMaskingConfig>>>>,
     ) {
         self.weak = self_weak;
     }
-
     fn log(&self) -> &Log {
         &self.log
     }
-
     fn on_config(&mut self, config: Rc<AiDataMaskingConfig>) {
-        self.config = Some(Rc::new(RuntimeAiDataMaskingConfig::from_config(
-            config.as_ref(),
-            &self.log,
-        )));
+        self.config = Some(config.clone());
     }
-
     fn cache_request_body(&self) -> bool {
         true
     }
-
     fn cache_response_body(&self) -> bool {
         !self.stream
     }
-
     fn on_http_request_complete_body(&mut self, req_body: &Bytes) -> DataAction {
-        let config = match &self.config {
-            Some(config) => config.clone(),
-            None => return DataAction::Continue,
-        };
-        if get_request_path().contains("count_tokens") {
+        if self.config.is_none() {
             return DataAction::Continue;
         }
-
-        let mut body_string = match serde_json::from_slice::<Value>(req_body) {
-            Ok(value) => value.to_string(),
-            Err(_) => match String::from_utf8(req_body.clone()) {
-                Ok(body) => body,
-                Err(_) => return DataAction::Continue,
-            },
+        let config = self.config.as_ref().unwrap();
+        let mut req_body = match serde_json::from_slice::<Value>(req_body) {
+            Ok(r) => r.to_string(),
+            Err(_) => {
+                if let Ok(r) = String::from_utf8(req_body.clone()) {
+                    r
+                } else {
+                    return DataAction::Continue;
+                }
+            }
         };
-
-        let mut handled_json = false;
-        if let Ok(mut json_value) = serde_json::from_str::<Value>(&body_string) {
-            if config.deny_openai {
-                if let Some(match_result) = self.process_openai_request_body(&mut json_value) {
-                    return self.deny(false, Some(&match_result), REQUEST_PHASE);
+        if config.deny_openai {
+            if let Ok(req) = serde_json::from_str::<Req>(req_body.as_str()) {
+                self.is_openai = true;
+                self.stream = req.stream;
+                for msg in req.messages {
+                    if self.check_message(&msg.content)
+                        || self.check_message(&msg.reasoning_content)
+                    {
+                        return self.deny(false);
+                    }
+                    let new_content = match self.replace_request_msg(&msg.content) {
+                        Ok(content) => content,
+                        Err(error) => return self.deny_request_masking_error(&error),
+                    };
+                    let new_reasoning_content =
+                        match self.replace_request_msg(&msg.reasoning_content) {
+                            Ok(content) => content,
+                            Err(error) => return self.deny_request_masking_error(&error),
+                        };
+                    if new_content != msg.content {
+                        req_body = req_body.replace(
+                            &Value::String(msg.content).to_string(),
+                            &Value::String(new_content).to_string(),
+                        );
+                    }
+                    if new_reasoning_content != msg.reasoning_content {
+                        req_body = req_body.replace(
+                            &Value::String(msg.reasoning_content).to_string(),
+                            &Value::String(new_reasoning_content).to_string(),
+                        );
+                    }
                 }
-                handled_json = self.is_openai;
-            }
-            body_string = json_value.to_string();
-
-            if !config.deny_jsonpath.is_empty() {
-                if let Some(match_result) =
-                    self.process_request_jsonpath(&json_value, &mut body_string)
-                {
-                    return self.deny(false, Some(&match_result), REQUEST_PHASE);
-                }
-                handled_json = true;
+                return self.forward_request_body(&req_body);
             }
         }
-
+        if !config.deny_jsonpath.is_empty() {
+            if let Ok(json) = serde_json::from_str::<Value>(req_body.as_str()) {
+                for jsonpath in config.deny_jsonpath.clone() {
+                    for v in jsonpath.find_slice(&json) {
+                        if let JsonPathValue::Slice(d, _) = v {
+                            if let Some(s) = d.as_str() {
+                                if self.check_message(s) {
+                                    return self.deny(false);
+                                }
+                                let content = s.to_string();
+                                let new_content = match self.replace_request_msg(&content) {
+                                    Ok(content) => content,
+                                    Err(error) => return self.deny_request_masking_error(&error),
+                                };
+                                if new_content != content {
+                                    req_body = req_body.replace(
+                                        &Value::String(content).to_string(),
+                                        &Value::String(new_content).to_string(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                return self.forward_request_body(&req_body);
+            }
+        }
         if config.deny_raw {
-            if let Some(match_result) = self.check_message(&body_string) {
-                return self.deny(false, Some(&match_result), REQUEST_PHASE);
+            if self.check_message(&req_body) {
+                return self.deny(false);
             }
-            body_string = self.replace_request_msg(&body_string);
-        }
-
-        if handled_json || config.deny_raw {
-            return self.forward_request_body(&body_string);
+            let new_body = match self.replace_request_msg(&req_body) {
+                Ok(body) => body,
+                Err(error) => return self.deny_request_masking_error(&error),
+            };
+            if new_body != req_body {
+                return self.forward_request_body(&new_body);
+            }
+            return DataAction::Continue;
         }
         DataAction::Continue
     }
-
     fn on_http_response_complete_body(&mut self, res_body: &Bytes) -> DataAction {
-        let config = match &self.config {
-            Some(config) => config.clone(),
-            None => return DataAction::Continue,
+        if self.config.is_none() {
+            return DataAction::Continue;
+        }
+        let config = self.config.as_ref().unwrap();
+        let mut res_body = match serde_json::from_slice::<Value>(res_body) {
+            Ok(r) => r.to_string(),
+            Err(_) => {
+                if let Ok(r) = String::from_utf8(res_body.clone()) {
+                    r
+                } else {
+                    return DataAction::Continue;
+                }
+            }
         };
+        if config.deny_openai && self.is_openai {
+            if let Ok(res) = serde_json::from_str::<Res>(res_body.as_str()) {
+                for msg in res.choices {
+                    if let Some(message) = msg.message {
+                        if self.check_message(&message.content)
+                            || self.check_message(&message.reasoning_content)
+                        {
+                            return self.deny(true);
+                        }
 
-        let mut body_string = match serde_json::from_slice::<Value>(res_body) {
-            Ok(value) => value.to_string(),
-            Err(_) => match String::from_utf8(res_body.clone()) {
-                Ok(body) => body,
-                Err(_) => return DataAction::Continue,
-            },
-        };
+                        let Some(mask_restore) = &self.mask_restore else {
+                            continue;
+                        };
+                        let new_content = mask_restore.restore(&message.content);
+                        let new_reasoning_content =
+                            mask_restore.restore(&message.reasoning_content);
+                        if new_content != message.content {
+                            res_body = res_body.replace(
+                                &Value::String(message.content).to_string(),
+                                &Value::String(new_content).to_string(),
+                            );
+                        }
+                        if new_reasoning_content != message.reasoning_content {
+                            res_body = res_body.replace(
+                                &Value::String(message.reasoning_content).to_string(),
+                                &Value::String(new_reasoning_content).to_string(),
+                            );
+                        }
+                    }
+                }
+                self.replace_http_response_body(res_body.as_bytes());
 
-        let mut handled_json = false;
-        if self.is_openai {
-            if let Ok(mut json_value) = serde_json::from_str::<Value>(&body_string) {
-                self.process_openai_response_body(&mut json_value);
-                body_string = json_value.to_string();
-                handled_json = true;
+                return DataAction::Continue;
             }
         }
-
         if config.deny_raw {
-            body_string = self.restore_response_msg(&body_string);
-            handled_json = true;
-        }
-
-        if handled_json {
-            self.replace_http_response_body(body_string.as_bytes());
+            if self.check_message(&res_body) {
+                return self.deny(true);
+            }
+            if let Some(mask_restore) = &self.mask_restore {
+                res_body = mask_restore.restore(&res_body);
+            }
+            self.replace_http_response_body(res_body.as_bytes());
+            return DataAction::Continue;
         }
         DataAction::Continue
     }
-}
-
-fn regex_escape(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$' => {
-                escaped.push('\\');
-                escaped.push(ch);
-            }
-            _ => escaped.push(ch),
-        }
-    }
-    escaped
-}
-
-fn get_string_property(path: &[&str]) -> Option<String> {
-    if let Ok(Some(bytes)) = hostcalls::get_property(path.to_vec()) {
-        if let Ok(value) = String::from_utf8(bytes) {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn empty_to_null(value: &str) -> Value {
-    if value.trim().is_empty() {
-        Value::Null
-    } else {
-        Value::String(value.to_string())
-    }
-}
-
-fn find_next_turn_index<F>(items: &[Value], start: usize, is_turn_start: F) -> Option<usize>
-where
-    F: Fn(&Value) -> bool + Copy,
-{
-    items
-        .iter()
-        .enumerate()
-        .skip(start)
-        .find(|(_, item)| is_turn_start(item))
-        .map(|(idx, _)| idx)
-}
-
-fn process_turns_with_history_cleanup<F, P, H>(
-    items: &mut Vec<Value>,
-    is_turn_start: F,
-    mut process_turn: P,
-    mut on_historical_match: H,
-) -> Option<MatchResult>
-where
-    F: Fn(&Value) -> bool + Copy,
-    P: FnMut(&mut Value) -> Option<MatchResult>,
-    H: FnMut(&MatchResult),
-{
-    let latest_turn_idx = items.iter().rposition(|item| is_turn_start(item));
-    let Some(latest_turn_idx) = latest_turn_idx else {
-        return None;
-    };
-
-    if let Some(match_result) = process_turn(&mut items[latest_turn_idx]) {
-        return Some(match_result);
-    }
-
-    if latest_turn_idx == 0 {
-        return None;
-    }
-
-    let mut idx = latest_turn_idx;
-    while idx > 0 {
-        idx -= 1;
-        if !is_turn_start(&items[idx]) {
-            continue;
-        }
-        if let Some(match_result) = process_turn(&mut items[idx]) {
-            on_historical_match(&match_result);
-            let drain_end =
-                find_next_turn_index(items, idx + 1, is_turn_start).unwrap_or(items.len());
-            items.drain(idx..drain_end);
-        }
-    }
-
-    None
-}
-
-fn mask_numeric_middle(from_word: &str, replace_value: &str) -> Option<String> {
-    let mut chars = from_word.chars().collect::<Vec<_>>();
-    if chars.len() < 7 || !chars.iter().all(|ch| ch.is_ascii_digit()) {
-        return None;
-    }
-    let mut replace_chars = replace_value.chars();
-    let fill = replace_chars.next()?;
-    if replace_chars.next().is_some() {
-        return None;
-    }
-    let prefix_len = 3usize.min(chars.len().saturating_sub(1));
-    let suffix_len = 1usize;
-    let middle_end = chars.len().saturating_sub(suffix_len);
-    if prefix_len >= middle_end {
-        return None;
-    }
-    for ch in chars.iter_mut().take(middle_end).skip(prefix_len) {
-        *ch = fill;
-    }
-    Some(chars.into_iter().collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn contains_nanjing(value: &mut Value) -> Option<MatchResult> {
-        let contains = match value {
-            Value::String(text) => text.contains("南京"),
-            Value::Array(items) => items
-                .iter_mut()
-                .any(|item| contains_nanjing(item).is_some()),
-            Value::Object(object) => object
-                .values_mut()
-                .any(|item| contains_nanjing(item).is_some()),
-            _ => false,
-        };
-
-        contains.then(|| MatchResult {
-            rule_id: None,
-            pattern: "南京".to_string(),
-            match_type: DenyMatchType::Contains,
-            matched_text: "南京".to_string(),
-            excerpt: "南京".to_string(),
-        })
-    }
-
-    #[test]
-    fn process_turns_with_history_cleanup_removes_historical_offending_message_group() {
-        let mut messages = vec![
-            json!({"role": "user", "content": "请介绍南京的旅游景点"}),
-            json!({"role": "assistant", "content": "提问或回答中包含敏感词，已被屏蔽"}),
-            json!({"role": "user", "content": "请介绍北京的旅游景点"}),
-        ];
-
-        let result = process_turns_with_history_cleanup(
-            &mut messages,
-            AiDataMasking::is_user_role,
-            contains_nanjing,
-            |_| {},
-        );
-
-        assert!(result.is_none());
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["content"], "请介绍北京的旅游景点");
-    }
-
-    #[test]
-    fn process_turns_with_history_cleanup_keeps_latest_turn_blocking() {
-        let mut messages = vec![
-            json!({"role": "user", "content": "你好"}),
-            json!({"role": "assistant", "content": "你好，请问有什么可以帮你"}),
-            json!({"role": "user", "content": "请介绍南京的旅游景点"}),
-        ];
-
-        let result = process_turns_with_history_cleanup(
-            &mut messages,
-            AiDataMasking::is_user_role,
-            contains_nanjing,
-            |_| {},
-        );
-
-        assert!(result.is_some());
-        assert_eq!(messages.len(), 3);
-    }
-
-    #[test]
-    fn process_turns_with_history_cleanup_removes_historical_input_group() {
-        let mut input = vec![
-            json!({"role": "user", "content": "南京怎么样"}),
-            json!({"role": "assistant", "content": "提问或回答中包含敏感词，已被屏蔽"}),
-            json!({"role": "user", "content": "北京怎么样"}),
-        ];
-
-        let result = process_turns_with_history_cleanup(
-            &mut input,
-            AiDataMasking::is_input_turn_start,
-            contains_nanjing,
-            |_| {},
-        );
-
-        assert!(result.is_none());
-        assert_eq!(input.len(), 1);
-        assert_eq!(input[0]["content"], "北京怎么样");
-    }
-
-    #[test]
-    fn should_report_block_audit_only_once_per_phase() {
-        let mut masking = AiDataMasking {
-            weak: Weak::default(),
-            config: None,
-            mask_map: HashMap::new(),
-            mask_restore: None,
-            masking_error: None,
-            is_openai: false,
-            is_openai_stream: None,
-            stream: false,
-            request_block_audit_reported: false,
-            log: Log::new(PLUGIN_NAME.to_string()),
-            msg_window: MsgWindow::default(),
-            char_window_size: 0,
-            byte_window_size: 0,
-        };
-
-        assert!(masking.should_report_block_audit(REQUEST_PHASE));
-        assert!(!masking.should_report_block_audit(REQUEST_PHASE));
-        assert!(!masking.should_report_block_audit(RESPONSE_PHASE));
-    }
-
-    #[test]
-    fn system_deny_defaults_to_disabled() {
-        let config = RuntimeAiDataMaskingConfig::from_config(
-            &AiDataMaskingConfig::default(),
-            &Log::new(PLUGIN_NAME.to_string()),
-        );
-
-        assert!(config
-            .check_message("天安门", &Log::new(PLUGIN_NAME.to_string()))
-            .is_none());
-    }
-
-    #[test]
-    fn custom_system_deny_words_override_bundled_dictionary() {
-        let config = RuntimeAiDataMaskingConfig::from_config(
-            &AiDataMaskingConfig {
-                system_deny: true,
-                system_deny_words: Some(vec!["自定义词".to_string()]),
-                ..AiDataMaskingConfig::default()
-            },
-            &Log::new(PLUGIN_NAME.to_string()),
-        );
-
-        assert!(config
-            .check_message("自定义词", &Log::new(PLUGIN_NAME.to_string()))
-            .is_some());
-        assert!(config
-            .check_message("天安门", &Log::new(PLUGIN_NAME.to_string()))
-            .is_none());
-    }
-
-    #[test]
-    fn bundled_system_dictionary_is_used_when_projection_words_are_absent() {
-        let config = RuntimeAiDataMaskingConfig::from_config(
-            &AiDataMaskingConfig {
-                system_deny: true,
-                system_deny_words: None,
-                ..AiDataMaskingConfig::default()
-            },
-            &Log::new(PLUGIN_NAME.to_string()),
-        );
-
-        assert!(config
-            .check_message("天安门", &Log::new(PLUGIN_NAME.to_string()))
-            .is_some());
-    }
-
-    #[test]
-    fn short_system_dictionary_terms_do_not_block_benign_longer_queries() {
-        let config = RuntimeAiDataMaskingConfig::from_config(
-            &AiDataMaskingConfig {
-                system_deny: true,
-                system_deny_words: Some(vec!["天安门".to_string(), "天安门事件".to_string()]),
-                ..AiDataMaskingConfig::default()
-            },
-            &Log::new(PLUGIN_NAME.to_string()),
-        );
-
-        assert!(config
-            .check_message("天安门的景点", &Log::new(PLUGIN_NAME.to_string()))
-            .is_none());
-        assert!(config
-            .check_message("请介绍天安门事件", &Log::new(PLUGIN_NAME.to_string()))
-            .is_some());
-    }
-
-    #[test]
-    fn mask_numeric_middle_keeps_phone_prefix_and_suffix() {
-        assert_eq!(
-            Some("19011111112".to_string()),
-            mask_numeric_middle("19028732382", "1")
-        );
-        assert_eq!(None, mask_numeric_middle("foo@example.com", "1"));
-        assert_eq!(None, mask_numeric_middle("19028732382", "11"));
-    }
-}
-
-#[cfg(test)]
-mod restore_tests {
-    use super::*;
     use std::time::{Duration, Instant};
 
-    fn rule(regex: &str, type_: ReplaceType, restore: bool, value: &str) -> ReplaceRule {
-        ReplaceRule {
-            id: None,
-            description: String::new(),
-            priority: 0,
-            enabled: true,
+    fn rule(regex: &str, type_: Type, restore: bool, value: &str) -> Rule {
+        Rule {
             regex: Regex::new(regex).unwrap(),
             type_,
             restore,
@@ -1806,10 +1030,7 @@ mod restore_tests {
         }
     }
 
-    fn replace(
-        rule: &ReplaceRule,
-        message: &str,
-    ) -> (String, HashMap<String, RestoreEntry>, usize) {
+    fn replace(rule: &Rule, message: &str) -> (String, HashMap<String, RestoreEntry>, usize) {
         let mut mask_map = HashMap::new();
         let mut byte_window_size = 0;
         let mut char_window_size = 0;
@@ -1825,22 +1046,10 @@ mod restore_tests {
     }
 
     #[test]
-    fn replacement_preserves_platform_numeric_masking_and_restoration() {
-        let rule = rule(r"\d{11}", ReplaceType::Replace, true, "*");
-        let original = "phone: 19028732382";
-        let (masked, mask_map, count) = replace(&rule, original);
-
-        assert_eq!(masked, "phone: 190*******2");
-        assert_eq!(count, 1);
-        let restore = MaskRestore::from_map(mask_map).unwrap().unwrap();
-        assert_eq!(restore.restore(&masked), original);
-    }
-
-    #[test]
     fn replacement_expands_captures_for_each_match_context() {
         let rule = rule(
             r"(?<=(?<context>[ab]))x",
-            ReplaceType::Replace,
+            Type::Replace,
             false,
             "${context}-x",
         );
@@ -1853,7 +1062,7 @@ mod restore_tests {
 
     #[test]
     fn repeated_hash_keeps_restore_mapping() {
-        let rule = rule(r"\d{8}", ReplaceType::Hash, true, "");
+        let rule = rule(r"\d{8}", Type::Hash, true, "");
         let original = "12345678 12345678";
 
         let (masked, mask_map, match_count) = replace(&rule, original);
@@ -1929,13 +1138,9 @@ mod restore_tests {
             .backtrack_limit(1)
             .build()
             .unwrap();
-        let rule = ReplaceRule {
-            id: None,
-            description: String::new(),
-            priority: 0,
-            enabled: true,
+        let rule = Rule {
             regex,
-            type_: ReplaceType::Replace,
+            type_: Type::Replace,
             restore: false,
             value: "masked".to_string(),
         };
@@ -2026,7 +1231,7 @@ mod restore_tests {
 
     #[test]
     fn masks_forty_five_thousand_unique_values_without_per_word_replacement() {
-        let rule = rule(r"\d{11}", ReplaceType::Hash, true, "");
+        let rule = rule(r"\d{11}", Type::Hash, true, "");
         let message = (0..45_000)
             .map(|index| format!("{index:011}"))
             .collect::<Vec<_>>()

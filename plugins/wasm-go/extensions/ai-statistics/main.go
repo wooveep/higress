@@ -76,7 +76,6 @@ const (
 	// AI API Paths
 	PathOpenAIChatCompletions       = "/v1/chat/completions"
 	PathOpenAICompletions           = "/v1/completions"
-	PathOpenAIImageGenerations      = "/v1/images/generations"
 	PathOpenAIEmbeddings            = "/v1/embeddings"
 	PathOpenAIModels                = "/v1/models"
 	PathGeminiGenerateContent       = "/generateContent"
@@ -101,22 +100,12 @@ const (
 	ChatRound              = "chat_round"
 
 	// Inner span attributes
-	ArmsSpanKind                  = "gen_ai.span.kind"
-	ArmsModelName                 = "gen_ai.model_name"
-	ArmsRequestModel              = "gen_ai.request.model"
-	ArmsInputToken                = "gen_ai.usage.input_tokens"
-	ArmsOutputToken               = "gen_ai.usage.output_tokens"
-	ArmsTotalToken                = "gen_ai.usage.total_tokens"
-	ArmsCacheCreationInputToken   = "gen_ai.usage.cache_creation_input_tokens"
-	ArmsCacheCreation5mInputToken = "gen_ai.usage.cache_creation_5m_input_tokens"
-	ArmsCacheCreation1hInputToken = "gen_ai.usage.cache_creation_1h_input_tokens"
-	ArmsCacheReadInputToken       = "gen_ai.usage.cache_read_input_tokens"
-	ArmsInputImageToken           = "gen_ai.usage.input_image_tokens"
-	ArmsOutputImageToken          = "gen_ai.usage.output_image_tokens"
-	ArmsInputImageCount           = "gen_ai.usage.input_image_count"
-	ArmsOutputImageCount          = "gen_ai.usage.output_image_count"
-	ArmsRequestCount              = "gen_ai.usage.request_count"
-	ArmsCacheTTL                  = "gen_ai.usage.cache_ttl"
+	ArmsSpanKind     = "gen_ai.span.kind"
+	ArmsModelName    = "gen_ai.model_name"
+	ArmsRequestModel = "gen_ai.request.model"
+	ArmsInputToken   = "gen_ai.usage.input_tokens"
+	ArmsOutputToken  = "gen_ai.usage.output_tokens"
+	ArmsTotalToken   = "gen_ai.usage.total_tokens"
 
 	// Extract Rule
 	RuleFirst   = "first"
@@ -671,8 +660,8 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 
 	// If use_default_attributes or use_default_response_attributes is enabled and enable_path_suffixes is not configured, use default path suffixes
 	if (useDefaultAttributes || useDefaultResponseAttributes) && !configJson.Get("enable_path_suffixes").Exists() {
-		config.enablePathSuffixes = []string{"/completions", "/messages", "/images/generations"}
-		log.Infof("Using default path suffixes: /completions, /messages, /images/generations")
+		config.enablePathSuffixes = []string{"/completions", "/messages"}
+		log.Infof("Using default path suffixes: /completions, /messages")
 	} else {
 		// Process manually configured path suffixes
 		for _, suffix := range pathSuffixes {
@@ -770,9 +759,6 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body 
 	if config.shouldBufferRequestBody && len(body) > 0 {
 		// Set user defined log & span attributes.
 		setAttributeBySource(ctx, config, RequestBody, body)
-	}
-	if len(body) > 0 {
-		captureDetailedRequestHints(ctx, body)
 	}
 
 	// Extract model from request body if available, otherwise try path
@@ -930,7 +916,6 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 		if !ctx.GetBoolContext("hasStreamError", false) && isErrorResponse(event) {
 			ctx.SetContext("hasStreamError", true)
 		}
-		applyDetailedUsageAttributes(ctx, mergeDetailedUsageFromResponse(ctx, event))
 	}
 
 	// If the end of the stream is reached, record metrics/logs/spans.
@@ -1098,7 +1083,6 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
 				ctx.SetContext(tokenusage.CtxKeyOutputTokenDetails, usage.OutputTokenDetails)
 			}
 		}
-		applyDetailedUsageAttributes(ctx, mergeDetailedUsageFromResponse(ctx, body))
 	}
 
 	// Set user defined log & span attributes.
@@ -1504,36 +1488,6 @@ func debugLogAiLog(ctx wrapper.HttpContext) {
 	if outputTokenDetails := ctx.GetUserAttribute("output_token_details"); outputTokenDetails != nil {
 		userAttrs["output_token_details"] = outputTokenDetails
 	}
-	if cacheCreationInputTokens := ctx.GetUserAttribute("cache_creation_input_tokens"); cacheCreationInputTokens != nil {
-		userAttrs["cache_creation_input_tokens"] = cacheCreationInputTokens
-	}
-	if cacheCreation5mInputTokens := ctx.GetUserAttribute("cache_creation_5m_input_tokens"); cacheCreation5mInputTokens != nil {
-		userAttrs["cache_creation_5m_input_tokens"] = cacheCreation5mInputTokens
-	}
-	if cacheCreation1hInputTokens := ctx.GetUserAttribute("cache_creation_1h_input_tokens"); cacheCreation1hInputTokens != nil {
-		userAttrs["cache_creation_1h_input_tokens"] = cacheCreation1hInputTokens
-	}
-	if cacheReadInputTokens := ctx.GetUserAttribute("cache_read_input_tokens"); cacheReadInputTokens != nil {
-		userAttrs["cache_read_input_tokens"] = cacheReadInputTokens
-	}
-	if inputImageTokens := ctx.GetUserAttribute("input_image_tokens"); inputImageTokens != nil {
-		userAttrs["input_image_tokens"] = inputImageTokens
-	}
-	if outputImageTokens := ctx.GetUserAttribute("output_image_tokens"); outputImageTokens != nil {
-		userAttrs["output_image_tokens"] = outputImageTokens
-	}
-	if inputImageCount := ctx.GetUserAttribute("input_image_count"); inputImageCount != nil {
-		userAttrs["input_image_count"] = inputImageCount
-	}
-	if outputImageCount := ctx.GetUserAttribute("output_image_count"); outputImageCount != nil {
-		userAttrs["output_image_count"] = outputImageCount
-	}
-	if requestCount := ctx.GetUserAttribute("request_count"); requestCount != nil {
-		userAttrs["request_count"] = requestCount
-	}
-	if cacheTTL := ctx.GetUserAttribute("cache_ttl"); cacheTTL != nil {
-		userAttrs["cache_ttl"] = cacheTTL
-	}
 
 	// Log the attributes as JSON
 	logJson, _ := json.Marshal(userAttrs)
@@ -1552,53 +1506,12 @@ func setSpanAttribute(key string, value interface{}) {
 	}
 }
 
-func applyDetailedUsageAttributes(ctx wrapper.HttpContext, metrics detailedUsageMetrics) {
-	if metrics.Model != "" {
-		ctx.SetUserAttribute(tokenusage.CtxKeyModel, metrics.Model)
-		setSpanAttribute(ArmsModelName, metrics.Model)
-	}
-	if metrics.InputTokens > 0 {
-		ctx.SetUserAttribute(tokenusage.CtxKeyInputToken, metrics.InputTokens)
-		setSpanAttribute(ArmsInputToken, metrics.InputTokens)
-	}
-	if metrics.OutputTokens > 0 {
-		ctx.SetUserAttribute(tokenusage.CtxKeyOutputToken, metrics.OutputTokens)
-		setSpanAttribute(ArmsOutputToken, metrics.OutputTokens)
-	}
-	if totalTokens := metrics.TotalTokens(); totalTokens > 0 {
-		ctx.SetUserAttribute(tokenusage.CtxKeyTotalToken, totalTokens)
-		setSpanAttribute(ArmsTotalToken, totalTokens)
-	}
-	setDetailedUsageField(ctx, "cache_creation_input_token", "cache_creation_input_tokens", metrics.CacheCreationInputTokens, ArmsCacheCreationInputToken)
-	setDetailedUsageField(ctx, "cache_creation_5m_input_token", "cache_creation_5m_input_tokens", metrics.CacheCreation5mInputTokens, ArmsCacheCreation5mInputToken)
-	setDetailedUsageField(ctx, "cache_creation_1h_input_token", "cache_creation_1h_input_tokens", metrics.CacheCreation1hInputTokens, ArmsCacheCreation1hInputToken)
-	setDetailedUsageField(ctx, "cache_read_input_token", "cache_read_input_tokens", metrics.CacheReadInputTokens, ArmsCacheReadInputToken)
-	setDetailedUsageField(ctx, "input_image_token", "input_image_tokens", metrics.InputImageTokens, ArmsInputImageToken)
-	setDetailedUsageField(ctx, "output_image_token", "output_image_tokens", metrics.OutputImageTokens, ArmsOutputImageToken)
-	setDetailedUsageField(ctx, "input_image_count", "input_image_count", metrics.InputImageCount, ArmsInputImageCount)
-	setDetailedUsageField(ctx, "output_image_count", "output_image_count", metrics.OutputImageCount, ArmsOutputImageCount)
-	setDetailedUsageField(ctx, "request_count", "request_count", metrics.RequestCount, ArmsRequestCount)
-	if metrics.CacheTTL != "" {
-		ctx.SetUserAttribute("cache_ttl", metrics.CacheTTL)
-		setSpanAttribute(ArmsCacheTTL, metrics.CacheTTL)
-	}
-}
-
-func setDetailedUsageField(ctx wrapper.HttpContext, metricKey string, logKey string, value int64, spanKey string) {
-	if value <= 0 {
-		return
-	}
-	ctx.SetUserAttribute(metricKey, value)
-	ctx.SetUserAttribute(logKey, value)
-	setSpanAttribute(spanKey, value)
-}
-
 // isErrorResponse checks whether the LLM response indicates an error.
 // Detects errors by:
-//  1. Response body contains non-null "error" field at root level (OpenAI/Anthropic format).
-//     Handles both raw JSON and SSE "data: " prefixed chunks, including multi-event
-//     streaming buffers.
-//  2. HTTP status code >= 400 as fallback when body is empty.
+// 1. Response body contains non-null "error" field at root level (OpenAI/Anthropic format).
+//    Handles both raw JSON and SSE "data: " prefixed chunks, including multi-event
+//    streaming buffers.
+// 2. HTTP status code >= 400 as fallback when body is empty.
 //
 // Note: some providers (e.g. Anthropic streaming responses) emit {"error":""}
 // even on success; an empty-string error is treated as not-an-error to avoid
@@ -1688,11 +1601,7 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig, body []byte
 		return
 	}
 
-	if ctx.GetUserAttribute(tokenusage.CtxKeyInputToken) == nil &&
-		ctx.GetUserAttribute(tokenusage.CtxKeyOutputToken) == nil &&
-		ctx.GetUserAttribute(tokenusage.CtxKeyTotalToken) == nil &&
-		ctx.GetUserAttribute("input_image_count") == nil &&
-		ctx.GetUserAttribute("output_image_count") == nil {
+	if ctx.GetUserAttribute(tokenusage.CtxKeyModel) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyInputToken) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyOutputToken) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyTotalToken) == nil {
 		log.Info("get usage information failed, skip metric record")
 		return
 	}
@@ -1704,27 +1613,18 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig, body []byte
 	if inputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyInputToken)); ok {
 		config.incrementCounter(generateMetricName(route, cluster, model, consumer, tokenusage.CtxKeyInputToken), inputToken)
 	} else {
-		log.Debug("InputToken missing, skip token counter")
+		log.Info("InputToken type assert failed, skip metric record")
 	}
 	if outputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyOutputToken)); ok {
 		config.incrementCounter(generateMetricName(route, cluster, model, consumer, tokenusage.CtxKeyOutputToken), outputToken)
 	} else {
-		log.Debug("OutputToken missing, skip token counter")
+		log.Info("OutputToken type assert failed, skip metric record")
 	}
 	if totalToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyTotalToken)); ok {
 		config.incrementCounter(generateMetricName(route, cluster, model, consumer, tokenusage.CtxKeyTotalToken), totalToken)
 	} else {
-		log.Debug("TotalToken missing, skip token counter")
+		log.Info("TotalToken type assert failed, skip metric record")
 	}
-	incrementOptionalMetric(ctx, config, route, cluster, model, consumer, "cache_creation_input_token")
-	incrementOptionalMetric(ctx, config, route, cluster, model, consumer, "cache_creation_5m_input_token")
-	incrementOptionalMetric(ctx, config, route, cluster, model, consumer, "cache_creation_1h_input_token")
-	incrementOptionalMetric(ctx, config, route, cluster, model, consumer, "cache_read_input_token")
-	incrementOptionalMetric(ctx, config, route, cluster, model, consumer, "input_image_token")
-	incrementOptionalMetric(ctx, config, route, cluster, model, consumer, "output_image_token")
-	incrementOptionalMetric(ctx, config, route, cluster, model, consumer, "input_image_count")
-	incrementOptionalMetric(ctx, config, route, cluster, model, consumer, "output_image_count")
-	incrementOptionalMetric(ctx, config, route, cluster, model, consumer, "request_count")
 
 	// Generate duration metrics
 	var llmFirstTokenDuration, llmServiceDuration uint64
@@ -1765,11 +1665,5 @@ func convertToUInt(val interface{}) (uint64, bool) {
 		return v, true
 	default:
 		return 0, false
-	}
-}
-
-func incrementOptionalMetric(ctx wrapper.HttpContext, config AIStatisticsConfig, route string, cluster string, model string, consumer string, key string) {
-	if value, ok := convertToUInt(ctx.GetUserAttribute(key)); ok {
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, key), value)
 	}
 }

@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	DefaultHigressNamespace = "aigateway-system"
+	DefaultHigressNamespace = "higress-system"
 	HigressExtGroup         = "extensions.higress.io"
 	HigressExtVersion       = "v1alpha1"
 	HigressExtAPIVersion    = HigressExtGroup + "/" + HigressExtVersion

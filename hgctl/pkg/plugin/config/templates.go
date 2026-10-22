@@ -115,7 +115,7 @@ func ExtractPluginConfFrom(spec *types.WasmPluginMeta, config, url string) (*Plu
 
 	pc := &PluginConf{
 		Name:        spec.Info.Name,
-		Namespace:   "aigateway-system",
+		Namespace:   "higress-system",
 		Title:       spec.Info.Title,
 		Description: spec.Info.Description,
 		IconUrl:     spec.Info.IconUrl,
@@ -136,7 +136,7 @@ func (pc *PluginConf) withDefaultValue() {
 		pc.Name = "Unnamed"
 	}
 	if pc.Namespace == "" {
-		pc.Namespace = "aigateway-system"
+		pc.Namespace = "higress-system"
 	}
 	if pc.Title == "" {
 		pc.Title = "Untitled"

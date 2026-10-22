@@ -4,36 +4,20 @@ keywords: [ AI Gateway, AI Quota ]
 description: AI quota management plugin configuration reference
 ---
 ## Function Description
-The `ai-quota` plugin supports two operating modes:
-
-- `token`: legacy mode that directly checks and deducts token quotas stored in Redis.
-- `amount`: billing mode. The plugin checks wallet balance and model pricing before forwarding the request, then calculates the final charge from real `input/output` token usage and writes a usage event to Redis Stream for durable billing.
-
-The plugin works together with authentication plugins such as `key-auth` and `jwt-auth` to identify the consumer. In `amount` mode it no longer relies on `ai-statistics` as the primary billing source.
-
-Natural day/week/month windows in `amount` mode are always computed in `UTC`:
-
-- daily windows reset at the next `00:00` in Shanghai
-- weekly windows start on Monday `00:00`
-- monthly windows start at the first day of the next month `00:00`
+The `ai-quota` plugin implements quota rate limiting based on fixed quotas allocated to specific consumers. It also supports quota management capabilities, including querying quotas, refreshing quotas, and increasing or decreasing quotas. The `ai-quota` plugin needs to work with authentication plugins such as `key-auth`, `jwt-auth`, etc., to obtain the consumer name associated with the authenticated identity, and it needs to work with the `ai-statistics` plugin to obtain AI Token statistical information.
 
 ## Runtime Properties
 Plugin execution phase: `default phase`
 Plugin execution priority: `750`
 
 ## Configuration Description
-| Name | Data Type | Required Conditions | Default Value | Description |
-| --- | --- | --- | --- | --- |
-| `quota_unit` | string | Optional | `token` | Quota unit, either `token` or `amount` |
-| `redis_key_prefix` | string | Optional | `chat_quota:` | Quota Redis key prefix in `token` mode |
-| `balance_key_prefix` | string | Optional | `billing:balance:` | Wallet balance key prefix in `amount` mode |
-| `price_key_prefix` | string | Optional | `billing:model-price:` | Model pricing hash prefix in `amount` mode |
-| `usage_event_stream` | string | Optional | `billing:usage:stream` | Usage event stream in `amount` mode |
-| `usage_event_dedup_prefix` | string | Optional | `billing:usage:event:` | Event deduplication key prefix in `amount` mode |
-| `admin_consumer` | string | Required | - | Consumer name for quota administration |
-| `admin_path` | string | Optional | `/quota` | Prefix for quota management paths |
-| `redis` | object | Yes | - | Redis related configuration |
-| `enable_path_suffixes` | []string      | Optional                                   | ["/v1/chat/completions", "/v1/messages", "/v1/completions", "/v1/responses", "/v1/embeddings", "/v1/images/generations"] | Enabled path suffixes for completion quota checks only; does not affect admin API path |
+| Name                 | Data Type        | Required Conditions                         | Default Value | Description                                       |
+|---------------------|------------------|--------------------------------------------|---------------|---------------------------------------------------|
+| `redis_key_prefix`  | string           | Optional                                   |   chat_quota: | Quota redis key prefix                            |
+| `admin_consumer`    | string           | Required                                   |               | Consumer name for managing quota management identity |
+| `admin_path`        | string           | Optional                                   |   /quota      | Prefix for the path to manage quota requests      |
+| `enable_path_suffixes` | []string      | Optional                                   | ["/v1/chat/completions", "/v1/messages"] | Enabled path suffixes for completion quota checks only; does not affect admin API path |
+| `redis`             | object           | Yes                                        |               | Redis related configuration                        |
 Explanation of each configuration field in `redis`
 | Configuration Item | Type   | Required | Default Value                                           | Explanation                                                                                             |
 |--------------------|--------|----------|---------------------------------------------------------|---------------------------------------------------------------------------------------------------------|
@@ -45,59 +29,8 @@ Explanation of each configuration field in `redis`
 | database           | int    | No       | 0                                                       | The database ID used, for example, configured as 1, corresponds to `SELECT 1`.                          |
 
 ## Configuration Example
-### Amount mode
+### Identify request parameter apikey and apply rate limiting accordingly
 ```yaml
-quota_unit: amount
-balance_key_prefix: "billing:balance:"
-price_key_prefix: "billing:model-price:"
-usage_event_stream: "billing:usage:stream"
-admin_consumer: consumer3
-admin_path: /quota
-redis:
-  service_name: redis-service.default.svc.cluster.local
-  service_port: 6379
-  timeout: 2000
-```
-
-In `amount` mode:
-
-- Request admission checks the consumer balance and model pricing.
-- Missing pricing or non-positive balance will reject the request and emit an audit event.
-- Successful responses are charged using the real token usage reported by the upstream model.
-- The plugin writes a usage event into Redis Stream, and the backend billing consumer persists it into PostgreSQL.
-- Daily, weekly, and monthly amount-window TTLs are derived from the Shanghai calendar rather than the host machine timezone.
-
-### Detailed Billing Semantics In `amount` Mode
-
-The plugin reads the Redis hash at `price_key_prefix + <provider>/<model>`. This price snapshot is materialized by Portal ahead of time, so all `ModelPriceData` fallback rules have already been resolved before runtime billing starts.
-
-The usage event and ledger pipeline now carry these detailed fields:
-
-- `input_tokens`
-- `output_tokens`
-- `cache_creation_input_tokens`
-- `cache_creation_5m_input_tokens`
-- `cache_creation_1h_input_tokens`
-- `cache_read_input_tokens`
-- `input_image_tokens`
-- `output_image_tokens`
-- `input_image_count`
-- `output_image_count`
-- `request_count`
-
-The final charge can include:
-
-- text input and output token pricing
-- cache creation, cache read, and `above_200k` tier pricing
-- input and output image token pricing
-- `input_cost_per_request`
-- `input_cost_per_image` and `output_cost_per_image`
-
-If the upstream provider only returns aggregate `cache_creation_input_tokens`, the plugin uses request-side `cache_control.ttl` or equivalent `ttl` hints to distribute the remaining tokens into the `5m` or `1h` buckets. When TTL is absent, the remainder falls back to `5m`.
-
-### Legacy token mode
-```yaml
-quota_unit: token
 redis_key_prefix: "chat_quota:"
 admin_consumer: consumer3
 admin_path: /quota
@@ -110,9 +43,7 @@ redis:
 ### Refresh Quota
 If the suffix of the current request URL matches the admin_path, for example, if the plugin is effective on the route example.com/v1/chat/completions, then the quota can be updated via:
 curl https://example.com/v1/chat/completions/quota/refresh -H "Authorization: Bearer credential3" -d "consumer=consumer1&quota=10000"
-In `token` mode, the value of `chat_quota:consumer1` in Redis will be refreshed to `10000`.
-
-In `amount` mode, the same admin path writes the wallet balance key, which is usually projected from the billing control plane.
+The value of the key `chat_quota:consumer1` in Redis will be refreshed to 10000.
 
 ### Query Quota
 To query the quota of a specific user, you can use: 

@@ -30,7 +30,6 @@ var basicKeyAuthConfig = func() json.RawMessage {
 			{
 				"name":       "consumer1",
 				"credential": "token1",
-				"key_id":     "KEY123",
 			},
 			{
 				"name":       "consumer2",
@@ -73,7 +72,6 @@ var globalAuthFalseConfig = func() json.RawMessage {
 			{
 				"name":       "consumer1",
 				"credential": "token1",
-				"key_id":     "KEY123",
 			},
 		},
 		"keys":        []string{"x-api-key"},
@@ -91,7 +89,6 @@ var queryKeyConfig = func() json.RawMessage {
 			{
 				"name":       "consumer1",
 				"credential": "token1",
-				"key_id":     "KEY123",
 			},
 		},
 		"keys":        []string{"apikey"},
@@ -352,9 +349,9 @@ func TestParseGlobalConfig(t *testing.T) {
 			keyAuthConfig := config.(*KeyAuthConfig)
 			require.Len(t, keyAuthConfig.consumers, 2)
 			require.Equal(t, []string{"token1", "token1-alt"}, keyAuthConfig.consumers[0].Credentials)
-			require.Equal(t, "consumer1", keyAuthConfig.credential2Consumer["token1"].Name)
-			require.Equal(t, "consumer1", keyAuthConfig.credential2Consumer["token1-alt"].Name)
-			require.Equal(t, "consumer2", keyAuthConfig.credential2Consumer["token2"].Name)
+			require.Equal(t, "consumer1", keyAuthConfig.credential2Name["token1"])
+			require.Equal(t, "consumer1", keyAuthConfig.credential2Name["token1-alt"])
+			require.Equal(t, "consumer2", keyAuthConfig.credential2Name["token2"])
 		})
 
 		// 测试全局认证关闭配置
@@ -529,17 +526,13 @@ func TestOnHTTPRequestHeaders(t *testing.T) {
 			// 验证是否添加了 X-Mse-Consumer 头
 			headers := host.GetRequestHeaders()
 			consumerHeaderFound := false
-			apiKeyHeaderFound := false
 			for _, header := range headers {
 				if header[0] == "x-mse-consumer" && header[1] == "consumer1" {
 					consumerHeaderFound = true
-				}
-				if header[0] == "x-higress-api-key-id" && header[1] == "KEY123" {
-					apiKeyHeaderFound = true
+					break
 				}
 			}
 			require.True(t, consumerHeaderFound, "X-Mse-Consumer header should be added")
-			require.True(t, apiKeyHeaderFound, "X-Higress-Api-Key-Id header should be added")
 
 			host.CompleteHttp()
 		})

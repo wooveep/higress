@@ -257,13 +257,11 @@ func onHttpResponseBody(ctx wrapper.HttpContext, cfg config.AiTokenRateLimitConf
 	tokenusage.ExtractInputTokenDetails(ctx, body, &usage)
 	tokenusage.ExtractOutputTokenDetails(ctx, body, &usage)
 	tokenusage.ExtractTotalTokens(ctx, body, &usage)
-	mergeDetailedUsageFromResponse(ctx, body)
 	processTokenUsage(ctx, cfg, usage, true)
 	return types.ActionContinue
 }
 
 func processResponseBody(ctx wrapper.HttpContext, cfg config.AiTokenRateLimitConfig, data []byte, endOfStream bool) []byte {
-	mergeDetailedUsageFromResponse(ctx, data)
 	processTokenUsage(ctx, cfg, tokenusage.GetTokenUsage(ctx, data), endOfStream)
 	return data
 }
@@ -275,47 +273,7 @@ func processTokenUsage(ctx wrapper.HttpContext, cfg config.AiTokenRateLimitConfi
 		ctx.SetContext(tokenusage.CtxKeyInputToken, usage.InputToken)
 		ctx.SetContext(tokenusage.CtxKeyOutputToken, usage.OutputToken)
 	}
-	detailedUsage := getDetailedUsageFromContext(ctx)
-	if detailedUsage.InputTokens > 0 {
-		ctx.SetContext(tokenusage.CtxKeyInputToken, detailedUsage.InputTokens)
-	}
-	if detailedUsage.OutputTokens > 0 {
-		ctx.SetContext(tokenusage.CtxKeyOutputToken, detailedUsage.OutputTokens)
-	}
 	if !endOfStream {
-		return
-	}
-	if cfg.LimitUnit == config.LimitUnitAmount {
-		limitRedisContext, ok := ctx.GetContext(LimitRedisContextKey).(LimitRedisContext)
-		if !ok || len(limitRedisContext.rules) == 0 {
-			return
-		}
-		modelName := resolveAmountModelName(ctx, detailedUsage)
-		if modelName == "" {
-			return
-		}
-		_ = cfg.RedisClient.Command([]interface{}{"hgetall", cfg.PriceKeyPrefix + modelName}, func(response resp.Value) {
-			price, ok := parseModelPriceResponse(modelName, response)
-			if err := response.Error(); err != nil || !ok {
-				if err != nil {
-					log.Errorf("load amount mode price failed: %v", err)
-				}
-				return
-			}
-			cost := calculateAmountCost(detailedUsage, price)
-			if cost <= 0 {
-				return
-			}
-			keys := make([]interface{}, len(limitRedisContext.rules))
-			args := make([]interface{}, 0, len(limitRedisContext.rules)*3)
-			for i, rule := range limitRedisContext.rules {
-				keys[i] = rule.key
-				args = append(args, rule.count, rule.window, cost)
-			}
-			if err := cfg.RedisClient.Eval(MultiKeyResponsePhaseScript, len(keys), keys, args, nil); err != nil {
-				log.Errorf("redis call failed: %v", err)
-			}
-		})
 		return
 	}
 

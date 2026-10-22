@@ -14,7 +14,7 @@ controller:
 
 storage:
   url: file://${INSTALLPACKAGEPATH}/conf
-  ns: aigateway-system
+  ns: higress-system
   username:
   password:
   dataEncKey:
@@ -28,3 +28,4 @@ charts:
     url: https://higress.io/standalone/get-higress.sh
     name: standalone
     version: latest
+

@@ -15,7 +15,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -26,49 +25,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/resp"
 )
-
-func TestAmountResponseUpdatesAllMatchedRules(t *testing.T) {
-	test.RunGoTest(t, func(t *testing.T) {
-		config := json.RawMessage(`{
-			"rule_name":"amount-merge", "limit_unit":"amount",
-			"global_threshold":{"amount_per_minute":1000000},
-			"rule_items":[{"limit_by_header":"x-api-key","limit_keys":[{"key":"vip-key","amount_per_minute":500000}]}],
-			"redis":{"service_name":"redis.static","service_port":6379}
-		}`)
-		host, status := test.NewTestHost(config)
-		defer host.Reset()
-		require.Equal(t, types.OnPluginStartStatusOK, status)
-		require.Equal(t, types.HeaderStopAllIterationAndWatermark, host.CallOnHttpRequestHeaders([][2]string{
-			{":authority", "example.com"}, {":path", "/v1/chat/completions"},
-			{":method", "POST"}, {"x-api-key", "vip-key"},
-		}))
-		host.CallOnRedisCall(0, multiRuleResp([3]int{1000000, 0, 60}, [3]int{500000, 0, 60}))
-		host.CallOnHttpResponseHeaders([][2]string{{":status", "200"}, {"content-type", "application/json"}})
-		host.CallOnHttpResponseBody([]byte(`{"model":"gpt-test","usage":{"prompt_tokens":10,"completion_tokens":15,"total_tokens":25}}`))
-		callouts := host.GetRedisCalloutAttributes()
-		require.Len(t, callouts, 1)
-		for _, callout := range callouts {
-			require.Contains(t, string(callout.Query), "billing:model-price:gpt-test")
-		}
-		host.CallOnRedisCall(0, test.CreateRedisResp([]interface{}{
-			"input_price_micro_yuan_per_token", "2", "output_price_micro_yuan_per_token", "3",
-		}))
-		callouts = host.GetRedisCalloutAttributes()
-		require.Len(t, callouts, 1)
-		for _, callout := range callouts {
-			command, _, err := resp.NewReader(bytes.NewReader(callout.Query)).ReadValue()
-			require.NoError(t, err)
-			args := command.Array()
-			require.Len(t, args, 11)
-			require.Equal(t, "2", args[2].String())
-			require.Equal(t, "higress-token-ratelimit:{amount-merge}:global_threshold:60", args[3].String())
-			require.Equal(t, "higress-token-ratelimit:{amount-merge}:limit_by_header:60:x-api-key:vip-key", args[4].String())
-			require.Equal(t, "65", args[7].String())
-			require.Equal(t, "65", args[10].String())
-		}
-		host.CompleteHttp()
-	})
-}
 
 // 测试配置：全局限流配置
 var globalThresholdConfig = func() json.RawMessage {
