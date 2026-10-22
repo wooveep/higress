@@ -33,6 +33,7 @@ Plugin execution priority: `750`
 | `admin_consumer` | string | Required | - | Consumer name for quota administration |
 | `admin_path` | string | Optional | `/quota` | Prefix for quota management paths |
 | `redis` | object | Yes | - | Redis related configuration |
+| `enable_path_suffixes` | []string      | Optional                                   | ["/v1/chat/completions", "/v1/messages", "/v1/completions", "/v1/responses", "/v1/embeddings", "/v1/images/generations"] | Enabled path suffixes for completion quota checks only; does not affect admin API path |
 Explanation of each configuration field in `redis`
 | Configuration Item | Type   | Required | Default Value                                           | Explanation                                                                                             |
 |--------------------|--------|----------|---------------------------------------------------------|---------------------------------------------------------------------------------------------------------|

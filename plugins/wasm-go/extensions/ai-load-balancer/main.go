@@ -2,15 +2,20 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 
+	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
+	"github.com/higress-group/wasm-go/pkg/log"
 	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/tidwall/gjson"
 
 	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-load-balancer/cluster_metrics"
+	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-load-balancer/cluster_hash"
 	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-load-balancer/endpoint_metrics"
 	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-load-balancer/global_least_request"
 	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-load-balancer/prefix_cache"
+	"github.com/alibaba/higress/plugins/wasm-go/pkg/jsonbody"
 )
 
 func main() {}
@@ -48,6 +53,7 @@ const (
 	EndpointLoadBalancerType = "endpoint"
 	// Cluster load balancer policies
 	MetricsBasedCluster = "cluster_metrics"
+	ClusterHashCluster  = "cluster_hash"
 	// Endpoint load balancer policies
 	MetricsBasedEndpoint           = "endpoint_metrics"
 	MetricsBasedEndpointDeprecated = "metrics_based" // Compatible with old configurations, equal to `endpoint_metrics`
@@ -68,6 +74,8 @@ func parseConfig(json gjson.Result, config *Config) error {
 		switch config.lbPolicy {
 		case MetricsBasedCluster:
 			config.lb, err = cluster_metrics.NewClusterEndpointLoadBalancer(json.Get("lb_config"))
+		case ClusterHashCluster:
+			config.lb, err = cluster_hash.NewClusterHashLoadBalancer(json.Get("lb_config"))
 		default:
 			err = fmt.Errorf("lb_policy %s is not supported", config.lbPolicy)
 		}
@@ -93,6 +101,24 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config Config) types.Action {
 }
 
 func onHttpRequestBody(ctx wrapper.HttpContext, config Config, body []byte) types.Action {
+	// Runs before the load balancing policy reads the model to pick an endpoint:
+	// gjson keeps the first occurrence of a duplicated member while the upstream
+	// parser keeps the last, so the endpoint would otherwise be selected for a
+	// different model than the one the upstream serves.
+	if duplicate, err := jsonbody.DuplicateTopLevelMember(body, "model"); err != nil {
+		log.Debugf("skip duplicate model member check: %v", err)
+	} else if duplicate {
+		message := jsonbody.DuplicateMemberMessage("model")
+		log.Warnf("rejecting request: %s", message)
+		_ = proxywasm.SendHttpResponseWithDetail(
+			http.StatusBadRequest,
+			"duplicate_model_member",
+			[][2]string{{"content-type", "text/plain"}},
+			[]byte(message),
+			-1,
+		)
+		return types.ActionPause
+	}
 	return config.lb.HandleHttpRequestBody(ctx, body)
 }
 

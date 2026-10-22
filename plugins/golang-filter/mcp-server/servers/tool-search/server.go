@@ -49,6 +49,11 @@ type ToolSearchConfig struct {
 	description string
 }
 
+func (c *ToolSearchConfig) Clone() common.Server {
+	cloned := *c
+	return &cloned
+}
+
 func (c *ToolSearchConfig) ParseConfig(config map[string]any) error {
 	// Parse vector configuration
 	vectorConfig, ok := config["vector"].(map[string]any)
@@ -173,7 +178,7 @@ func (c *ToolSearchConfig) NewServer(serverName string) (*common.MCPServer, erro
 	// Create embedding client
 	embeddingClient := NewEmbeddingClient(c.Embedding.APIKey, c.Embedding.BaseURL, c.Embedding.Model, c.Embedding.Dimensions)
 
-	// Create search service，使用写死的fixedMaxTools值
+	// Create search service
 	searchService := NewSearchService(
 		c.Vector.Host,
 		c.Vector.Port,
@@ -183,8 +188,11 @@ func (c *ToolSearchConfig) NewServer(serverName string) (*common.MCPServer, erro
 		c.Vector.TableName,
 		embeddingClient,
 		c.Embedding.Dimensions,
-		fixedMaxTools, // 使用写死的值
+		fixedMaxTools,
 	)
+	if searchService == nil {
+		return nil, errors.New("failed to create tool search service: Milvus connection failed")
+	}
 
 	// Add tool search tool
 	mcpServer.AddTool(

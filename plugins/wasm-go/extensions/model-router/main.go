@@ -17,11 +17,14 @@ import (
 	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+
+	"github.com/alibaba/higress/plugins/wasm-go/pkg/jsonbody"
 )
 
 const (
 	DefaultMaxBodyBytes = 100 * 1024 * 1024 // 100MB
 	AutoModelPrefix     = "higress/auto"
+	DefaultModelHeader  = "x-higress-llm-model"
 )
 
 func main() {}
@@ -32,7 +35,6 @@ func init() {
 		wrapper.ParseConfig(parseConfig),
 		wrapper.ProcessRequestHeaders(onHttpRequestHeaders),
 		wrapper.ProcessRequestBody(onHttpRequestBody),
-		wrapper.WithRebuildAfterRequests[ModelRouterConfig](1000),
 		wrapper.WithRebuildMaxMemBytes[ModelRouterConfig](200*1024*1024),
 	)
 }
@@ -44,10 +46,11 @@ type AutoRoutingRule struct {
 }
 
 type ModelRouterConfig struct {
-	modelKey           string
-	addProviderHeader  string
-	modelToHeader      string
-	enableOnPathSuffix []string
+	modelKey              string
+	addProviderHeader     string
+	modelToHeader         string
+	enableOnPathSuffix    []string
+	keepOriginalModelName bool
 	// Auto routing configuration
 	enableAutoRouting bool
 	autoRoutingRules  []AutoRoutingRule
@@ -61,6 +64,7 @@ func parseConfig(json gjson.Result, config *ModelRouterConfig) error {
 	}
 	config.addProviderHeader = json.Get("addProviderHeader").String()
 	config.modelToHeader = json.Get("modelToHeader").String()
+	config.keepOriginalModelName = json.Get("keepOriginalModelName").Bool()
 
 	enableOnPathSuffix := json.Get("enableOnPathSuffix")
 	if enableOnPathSuffix.Exists() && enableOnPathSuffix.IsArray() {
@@ -205,6 +209,26 @@ func handleJsonBody(ctx wrapper.HttpContext, config ModelRouterConfig, body []by
 		log.Error("invalid json body")
 		return types.ActionContinue
 	}
+	// Runs before the gjson read below and before any auto-routing or rewrite
+	// decision: gjson keeps the first occurrence of a duplicated member while
+	// the upstream parser keeps the last, so routing would otherwise be decided
+	// against a different model than the one the upstream serves. A modelKey
+	// holding a nested gjson path is never a top-level member name, so the count
+	// - which is scoped to the top level - reports nothing for it.
+	if duplicate, err := jsonbody.DuplicateTopLevelMember(body, config.modelKey); err != nil {
+		log.Debugf("skip duplicate %s member check: %v", config.modelKey, err)
+	} else if duplicate {
+		message := jsonbody.DuplicateMemberMessage(config.modelKey)
+		log.Warnf("rejecting request: %s", message)
+		_ = proxywasm.SendHttpResponseWithDetail(
+			http.StatusBadRequest,
+			"duplicate_model_member",
+			[][2]string{{"content-type", "text/plain"}},
+			[]byte(message),
+			-1,
+		)
+		return types.ActionPause
+	}
 	modelValue := gjson.GetBytes(body, config.modelKey).String()
 	if modelValue == "" {
 		return types.ActionContinue
@@ -228,7 +252,11 @@ func handleJsonBody(ctx wrapper.HttpContext, config ModelRouterConfig, body []by
 
 		if targetModel != "" {
 			// Set the matched model to the header for routing
-			_ = proxywasm.ReplaceHttpRequestHeader("x-higress-llm-model", targetModel)
+			modelHeader := DefaultModelHeader
+			if config.modelToHeader != "" {
+				modelHeader = config.modelToHeader
+			}
+			_ = proxywasm.ReplaceHttpRequestHeader(modelHeader, targetModel)
 			// Update the model field in the request body
 			newBody, err := sjson.SetBytes(body, config.modelKey, targetModel)
 			if err != nil {
@@ -254,12 +282,14 @@ func handleJsonBody(ctx wrapper.HttpContext, config ModelRouterConfig, body []by
 			model := parts[1]
 			_ = proxywasm.ReplaceHttpRequestHeader(config.addProviderHeader, provider)
 
-			newBody, err := sjson.SetBytes(body, config.modelKey, model)
-			if err != nil {
-				log.Errorf("failed to update model in json body: %v", err)
-				return types.ActionContinue
+			if !config.keepOriginalModelName {
+				newBody, err := sjson.SetBytes(body, config.modelKey, model)
+				if err != nil {
+					log.Errorf("failed to update model in json body: %v", err)
+					return types.ActionContinue
+				}
+				_ = proxywasm.ReplaceHttpRequestBody(newBody)
 			}
-			_ = proxywasm.ReplaceHttpRequestBody(newBody)
 			log.Debugf("model route to provider: %s, model: %s", provider, model)
 		} else {
 			log.Debugf("model route to provider not work, model: %s", modelValue)
@@ -320,25 +350,28 @@ func handleMultipartBody(ctx wrapper.HttpContext, config ModelRouterConfig, body
 					model := parts[1]
 					_ = proxywasm.ReplaceHttpRequestHeader(config.addProviderHeader, provider)
 
-					// Write modified part
-					h := make(http.Header)
-					for k, v := range part.Header {
-						h[k] = v
-					}
+					if !config.keepOriginalModelName {
+						// Write modified part
+						h := make(http.Header)
+						for k, v := range part.Header {
+							h[k] = v
+						}
 
-					pw, err := writer.CreatePart(textproto.MIMEHeader(h))
-					if err != nil {
-						log.Errorf("failed to create part: %v", err)
-						return types.ActionContinue
+						pw, err := writer.CreatePart(textproto.MIMEHeader(h))
+						if err != nil {
+							log.Errorf("failed to create part: %v", err)
+							return types.ActionContinue
+						}
+						_, err = pw.Write([]byte(model))
+						if err != nil {
+							log.Errorf("failed to write part content: %v", err)
+							return types.ActionContinue
+						}
+						modified = true
+						log.Debugf("model route to provider: %s, model: %s", provider, model)
+						continue
 					}
-					_, err = pw.Write([]byte(model))
-					if err != nil {
-						log.Errorf("failed to write part content: %v", err)
-						return types.ActionContinue
-					}
-					modified = true
-					log.Debugf("model route to provider: %s, model: %s", provider, model)
-					continue
+					log.Debugf("model route to provider: %s, model kept: %s", provider, modelValue)
 				} else {
 					log.Debugf("model route to provider not work, model: %s", modelValue)
 				}

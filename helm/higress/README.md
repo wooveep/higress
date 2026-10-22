@@ -125,7 +125,7 @@ The command removes all the Kubernetes components associated with the chart and 
 | gateway.readinessFailureThreshold | int | `30` | The number of successive failed probes before indicating readiness failure. |
 | gateway.readinessInitialDelaySeconds | int | `1` | The initial delay for readiness probes in seconds. |
 | gateway.readinessPeriodSeconds | int | `2` | The period between readiness probes. |
-| gateway.readinessSuccessThreshold | int | `1` | The number of successive successed probes before indicating readiness success. |
+| gateway.readinessSuccessThreshold | int | `1` | The number of successive successful probes before indicating readiness success. |
 | gateway.readinessTimeoutSeconds | int | `3` | The readiness timeout seconds |
 | gateway.replicas | int | `2` | Number of Higress Gateway pods |
 | gateway.resources.limits.cpu | string | `"2000m"` |  |
@@ -161,12 +161,15 @@ The command removes all the Kubernetes components associated with the chart and 
 | global.caAddress | string | `""` | The customized CA address to retrieve certificates for the pods in the cluster. CSR clients such as the Istio Agent and ingress gateways can use this to specify the CA endpoint. If not set explicitly, default to the Istio discovery address. |
 | global.caName | string | `""` | The name of the CA for workload certificates. For example, when caName=GkeWorkloadCertificate, GKE workload certificates will be used as the certificates for workloads. The default value is "" and when caName="", the CA will be configured by other mechanisms (e.g., environmental variable CA_PROVIDER). |
 | global.configCluster | bool | `false` | Configure a remote cluster as the config cluster for an external istiod. |
+| global.createIngressClass | bool | `true` | Whether to create the IngressClass resource for global.ingressClass. Set this to false when reusing an existing IngressClass, for example during Nginx Ingress migration. |
 | global.defaultPodDisruptionBudget | object | `{"enabled":false}` | enable pod disruption budget for the control plane, which is used to ensure Istio control plane components are gradually upgraded or recovered. |
 | global.defaultResources | object | `{"requests":{"cpu":"10m"}}` | A minimal set of requested resources to applied to all deployments so that Horizontal Pod Autoscaler will be able to function (if set). Each component can overwrite these default values by adding its own resources block in the relevant section below and setting the desired resources values. |
 | global.defaultUpstreamConcurrencyThreshold | int | `10000` |  |
 | global.disableAlpnH2 | bool | `false` | Whether to disable HTTP/2 in ALPN |
+| global.enableAlphaGatewayAPI | bool | `false` | If true, Higress Controller will monitor Gateway API resources that have not reached v1 yet |
 | global.enableDeltaXDS | bool | `true` | Whether to enable Istio delta xDS, default is false. |
 | global.enableGatewayAPI | bool | `true` | If true, Higress Controller will monitor Gateway API resources as well |
+| global.enableGatewayAPIDeploymentController | bool | `false` | If true, provision an isolated Deployment and Service for each managed Gateway API Gateway. This is opt-in to preserve the default shared Higress gateway deployment model. |
 | global.enableH3 | bool | `false` |  |
 | global.enableIPv6 | bool | `false` |  |
 | global.enableInferenceExtension | bool | `false` | If true, enable Gateway API Inference Extension support |
@@ -179,6 +182,7 @@ The command removes all the Kubernetes components associated with the chart and 
 | global.enableSRDS | bool | `true` |  |
 | global.enableStatus | bool | `true` | If true, Higress Controller will update the status field of Ingress resources. When migrating from Nginx Ingress, in order to avoid status field of Ingress objects being overwritten, this parameter needs to be set to false, so Higress won't write the entry IP to the status field of the corresponding Ingress object. |
 | global.externalIstiod | bool | `false` | Configure a remote cluster data plane controlled by an external istiod. When set to true, istiod is not deployed locally and only a subset of the other discovery charts are enabled. |
+| global.gatewayClass | string | `"higress"` | GatewayClassName used by Higress to select Gateway API resources. The default value higress uses controllerName higress.io/gateway-controller. A custom value, for example higress-internal, uses controllerName higress.io/gateway-controller-higress-internal. |
 | global.hostRDSMergeSubset | bool | `false` |  |
 | global.hub | string | `"higress-registry.cn-hangzhou.cr.aliyuncs.com"` | Default hub (registry) for Higress images. For Higress deployments, images are pulled from: {hub}/higress/{image} For built-in plugins, images are pulled from: {hub}/{pluginNamespace}/{plugin-name} Change this to use a mirror registry closer to your deployment region for faster image pulls. |
 | global.imagePullPolicy | string | `""` | Specify image pull policy if default behavior isn't desired. Default behavior: latest images will be Always else IfNotPresent. |
@@ -215,7 +219,7 @@ The command removes all the Kubernetes components associated with the chart and 
 | global.proxy.excludeInboundPorts | string | `""` |  |
 | global.proxy.excludeOutboundPorts | string | `""` |  |
 | global.proxy.holdApplicationUntilProxyStarts | bool | `false` | Controls if sidecar is injected at the front of the container list and blocks the start of the other containers until the proxy is ready |
-| global.proxy.image | string | `"proxyv2"` |  |
+| global.proxy.image | string | `"gateway"` |  |
 | global.proxy.includeIPRanges | string | `"*"` | istio egress capture allowlist https://istio.io/docs/tasks/traffic-management/egress.html#calling-external-services-directly example: includeIPRanges: "172.30.0.0/16,172.20.0.0/16" would only capture egress traffic on those two IP Ranges, all other outbound traffic would be allowed by the sidecar |
 | global.proxy.includeInboundPorts | string | `"*"` |  |
 | global.proxy.includeOutboundPorts | string | `""` |  |
@@ -225,12 +229,12 @@ The command removes all the Kubernetes components associated with the chart and 
 | global.proxy.readinessFailureThreshold | int | `30` | The number of successive failed probes before indicating readiness failure. |
 | global.proxy.readinessInitialDelaySeconds | int | `1` | The initial delay for readiness probes in seconds. |
 | global.proxy.readinessPeriodSeconds | int | `2` | The period between readiness probes. |
-| global.proxy.readinessSuccessThreshold | int | `30` | The number of successive successed probes before indicating readiness success. |
+| global.proxy.readinessSuccessThreshold | int | `30` | The number of successive successful probes before indicating readiness success. |
 | global.proxy.readinessTimeoutSeconds | int | `3` | The readiness timeout seconds |
 | global.proxy.resources | object | `{"limits":{"cpu":"2000m","memory":"1024Mi"},"requests":{"cpu":"100m","memory":"128Mi"}}` | Resources for the sidecar. |
 | global.proxy.statusPort | int | `15020` | Default port for Pilot agent health checks. A value of 0 will disable health checking. |
 | global.proxy.tracer | string | `""` | Specify which tracer to use. One of: lightstep, datadog, stackdriver. If using stackdriver tracer outside GCP, set env GOOGLE_APPLICATION_CREDENTIALS to the GCP credential file. |
-| global.proxy_init.image | string | `"proxyv2"` | Base name for the proxy_init container, used to configure iptables. |
+| global.proxy_init.image | string | `"gateway"` | Base name for the proxy_init container, used to configure iptables. |
 | global.proxy_init.resources.limits.cpu | string | `"2000m"` |  |
 | global.proxy_init.resources.limits.memory | string | `"1024Mi"` |  |
 | global.proxy_init.resources.requests.cpu | string | `"10m"` |  |
@@ -285,14 +289,23 @@ The command removes all the Kubernetes components associated with the chart and 
 | pluginServer.service.port | int | `80` |  |
 | pluginServer.tag | string | `""` |  |
 | redis.redis.affinity | object | `{}` | Affinity for Redis |
+| redis.redis.aof | object | `{"enabled":false,"fsync":"everysec","rewriteMinSize":"64mb","rewritePercentage":100}` | AOF (Append-Only File) persistence settings. Only effective when persistence.enabled=true. AOF logs every write operation, providing best durability (up to 1s data loss with everysec). Redis prefers AOF for recovery when both AOF and RDB are enabled. |
+| redis.redis.aof.enabled | bool | `false` | Enable AOF persistence. Default is false (opt-in). Set to true to enable AOF persistence. |
+| redis.redis.aof.fsync | string | `"everysec"` | AOF fsync policy: always, everysec, or no. "everysec" balances durability (≤1s data loss) and performance. See https://redis.io/docs/management/persistence/ |
+| redis.redis.aof.rewriteMinSize | string | `"64mb"` | Minimum AOF file size to trigger rewrite. Default 64mb prevents frequent rewrites. |
+| redis.redis.aof.rewritePercentage | int | `100` | Rewrite AOF when size exceeds this percentage of base file. Default 100 = 2x size. |
+| redis.redis.extraConfig | string | `""` | Extra redis-stack.conf directives appended after the generated config (requirepass, and AOF defaults when persistence is enabled). Directives here take precedence over generated defaults (Redis applies the last value). Example:   maxmemory 512mb   maxmemory-policy allkeys-lru |
 | redis.redis.image | string | `"redis-stack-server"` | Specify the image |
 | redis.redis.name | string | `"redis-stack-server"` |  |
 | redis.redis.nodeSelector | object | `{}` | NodeSelector Node labels for Redis |
 | redis.redis.password | string | `""` | Specify the password, if not set, no password is used |
 | redis.redis.persistence.accessModes | list | `["ReadWriteOnce"]` | Persistent Volume access modes |
-| redis.redis.persistence.enabled | bool | `false` | Enable persistence on Redis, default is false |
+| redis.redis.persistence.enabled | bool | `false` | Enable persistence on Redis. When enabled, a PVC is mounted at /data. The `dir /data` directive is written only when aof.enabled or rdb.enabled is true; if both are disabled, persistence must be driven via extraConfig (add `dir /data` there yourself). |
 | redis.redis.persistence.size | string | `"1Gi"` | Persistent Volume size |
 | redis.redis.persistence.storageClass | string | `""` | If undefined (the default) or set to null, no storageClassName spec is set, choosing the default provisioner |
+| redis.redis.rdb | object | `{"enabled":false,"save":["900 1","300 10","60 10000"]}` | RDB (Redis Database) snapshot persistence settings. Only effective when persistence.enabled=true. RDB provides compact point-in-time snapshots, useful for backups and faster restart. Can be enabled alongside AOF for dual persistence strategy. |
+| redis.redis.rdb.enabled | bool | `false` | Enable RDB snapshots. Default is false (opt-in). Set to true to enable RDB snapshots. |
+| redis.redis.rdb.save | list | `["900 1","300 10","60 10000"]` | RDB snapshot schedule as "seconds changes" pairs. Redis saves when ANY rule is matched. Only takes effect when rdb.enabled=true. Common defaults: "900 1" (15min/1 key), "300 10" (5min/10 keys), "60 10000" (1min/10000 keys). Set to empty list [] to disable RDB snapshots (renders `save ""`). See https://redis.io/docs/management/persistence/ |
 | redis.redis.replicas | int | `1` | Specify the number of replicas |
 | redis.redis.resources | object | `{}` | Specify the resources |
 | redis.redis.service | object | `{"port":6379,"type":"ClusterIP"}` | Service parameters |

@@ -37,6 +37,7 @@ description: AI 配额管理插件配置参考
 | `admin_consumer` | string | 必填 | - | 管理 quota 接口身份的 consumer 名称 |
 | `admin_path` | string | 选填 | `/quota` | 管理 quota 请求 path 前缀 |
 | `redis` | object | 必填 | - | Redis 相关配置 |
+| `enable_path_suffixes` | []string     | 选填                                   |  ["/v1/chat/completions", "/v1/messages", "/v1/completions", "/v1/responses", "/v1/embeddings", "/v1/images/generations"] | 启用配额校验的请求路径后缀（仅用于 completion 请求，不影响管理接口路径） |
 
 `redis`中每一项的配置字段说明
 

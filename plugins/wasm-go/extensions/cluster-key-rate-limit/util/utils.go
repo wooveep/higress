@@ -26,7 +26,10 @@ func ParseIP(source string) string {
 	}
 	// parse ipv6
 	if strings.Contains(source, "]") {
-		return strings.Split(source, "]")[0][1:]
+		// strings.Split always yields at least one element, but a value such as
+		// "]" or "]:80" leaves an empty first element, so the leading bracket
+		// must be removed with TrimPrefix instead of slicing.
+		return strings.TrimPrefix(strings.Split(source, "]")[0], "[")
 	}
 	return source
 }
@@ -50,8 +53,8 @@ func ExtractCookieValueByKey(cookie string, key string) (value string) {
 	pairs := strings.Split(cookie, ";")
 	for _, pair := range pairs {
 		pair = strings.TrimSpace(pair)
-		kv := strings.Split(pair, "=")
-		if kv[0] == key {
+		kv := strings.SplitN(pair, "=", 2)
+		if len(kv) == 2 && kv[0] == key {
 			value = kv[1]
 			break
 		}

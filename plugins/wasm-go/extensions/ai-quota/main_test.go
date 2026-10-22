@@ -16,6 +16,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"reflect"
 	"testing"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 	"github.com/higress-group/wasm-go/pkg/test"
+	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/stretchr/testify/require"
 )
 
@@ -49,6 +51,10 @@ var basicConfig = func() json.RawMessage {
 		"admin_consumer":   "admin",
 		"redis_key_prefix": "chat_quota:",
 		"admin_path":       "/quota",
+		"enable_path_suffixes": []string{
+			"/v1/chat/completions",
+			"/v1/messages",
+		},
 		"redis": map[string]interface{}{
 			"service_name": "redis.static",
 			"service_port": 6379,
@@ -87,6 +93,115 @@ var missingAdminConsumerConfig = func() json.RawMessage {
 	return data
 }()
 
+var defaultPathSuffixesConfig = func() json.RawMessage {
+	data, _ := json.Marshal(map[string]interface{}{
+		"admin_consumer": "admin",
+		"redis": map[string]interface{}{
+			"service_name": "redis.static",
+			"service_port": 6379,
+		},
+	})
+	return data
+}()
+
+type redisDecrement struct {
+	key   string
+	delta int
+}
+
+type recordingRedisClient struct {
+	wrapper.RedisClient
+	decrements []redisDecrement
+	err        error
+}
+
+func (c *recordingRedisClient) DecrBy(key string, delta int, _ wrapper.RedisResponseCallback) error {
+	c.decrements = append(c.decrements, redisDecrement{key: key, delta: delta})
+	return c.err
+}
+
+type recordingHTTPContext struct {
+	wrapper.HttpContext
+	context        map[string]interface{}
+	userAttributes map[string]interface{}
+	bufferedBody   bool
+	skippedBody    bool
+}
+
+func newRecordingHTTPContext(chatMode ChatMode, consumer string) *recordingHTTPContext {
+	ctx := &recordingHTTPContext{
+		context:        map[string]interface{}{"chatMode": chatMode},
+		userAttributes: map[string]interface{}{},
+	}
+	if consumer != "" {
+		ctx.context["consumer"] = consumer
+	}
+	return ctx
+}
+
+func (c *recordingHTTPContext) SetContext(key string, value interface{}) {
+	c.context[key] = value
+}
+
+func (c *recordingHTTPContext) GetContext(key string) interface{} {
+	return c.context[key]
+}
+
+func (c *recordingHTTPContext) SetUserAttribute(key string, value interface{}) {
+	c.userAttributes[key] = value
+}
+
+func (c *recordingHTTPContext) GetUserAttribute(key string) interface{} {
+	return c.userAttributes[key]
+}
+
+func (c *recordingHTTPContext) GetBoolContext(key string, defaultValue bool) bool {
+	value, ok := c.context[key].(bool)
+	if !ok {
+		return defaultValue
+	}
+	return value
+}
+
+func (c *recordingHTTPContext) GetStringContext(key, defaultValue string) string {
+	value, ok := c.context[key].(string)
+	if !ok {
+		return defaultValue
+	}
+	return value
+}
+
+func (c *recordingHTTPContext) GetByteSliceContext(key string, defaultValue []byte) []byte {
+	value, ok := c.context[key].([]byte)
+	if !ok {
+		return defaultValue
+	}
+	return value
+}
+
+func (c *recordingHTTPContext) BufferResponseBody() {
+	c.bufferedBody = true
+}
+
+func (c *recordingHTTPContext) DontReadResponseBody() {
+	c.skippedBody = true
+}
+
+func allowCompletionRequest(t *testing.T, host test.TestHost) {
+	t.Helper()
+
+	action := host.CallOnHttpRequestHeaders([][2]string{
+		{":authority", "example.com"},
+		{":path", "/v1/chat/completions"},
+		{":method", "POST"},
+		{"x-mse-consumer", "consumer1"},
+	})
+	require.Equal(t, types.HeaderStopAllIterationAndWatermark, action)
+
+	host.CallOnRedisCall(0, test.CreateRedisResp(1000))
+	require.Equal(t, types.ActionContinue, host.GetHttpStreamAction())
+}
+
 func TestParseConfig(t *testing.T) {
 	test.RunGoTest(t, func(t *testing.T) {
 		// 测试基础配置解析
@@ -102,6 +217,7 @@ func TestParseConfig(t *testing.T) {
 			require.Equal(t, "admin", quotaConfig.AdminConsumer)
 			require.Equal(t, "chat_quota:", quotaConfig.RedisKeyPrefix)
 			require.Equal(t, "/quota", quotaConfig.AdminPath)
+			require.Equal(t, []string{"/v1/chat/completions", "/v1/messages"}, quotaConfig.EnablePathSuffixes)
 		})
 
 		// 测试缺少admin_consumer的配置
@@ -121,6 +237,18 @@ func TestParseConfig(t *testing.T) {
 			require.Equal(t, QuotaUnitAmount, quotaConfig.QuotaUnit)
 			require.Equal(t, "billing:balance:", quotaConfig.BalanceKeyPrefix)
 			require.Equal(t, "billing:model-price:", quotaConfig.PriceKeyPrefix)
+		})
+
+		t.Run("default path suffixes", func(t *testing.T) {
+			host, status := test.NewTestHost(defaultPathSuffixesConfig)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+			config, err := host.GetMatchConfig()
+			require.NoError(t, err)
+			require.NotNil(t, config)
+
+			quotaConfig := config.(*QuotaConfig)
+			require.Equal(t, []string{"/v1/chat/completions", "/v1/messages", "/v1/completions", "/v1/responses", "/v1/embeddings", "/v1/images/generations"}, quotaConfig.EnablePathSuffixes)
 		})
 	})
 }
@@ -331,68 +459,92 @@ func TestOnHttpRequestBody(t *testing.T) {
 	})
 }
 
-func TestOnHttpStreamingResponseBody(t *testing.T) {
+func TestOnHttpResponseBody(t *testing.T) {
 	test.RunTest(t, func(t *testing.T) {
-		// 测试聊天完成模式的流式响应体处理
-		t.Run("chat completion mode", func(t *testing.T) {
+		t.Run("chunked non-streaming response is buffered before decrement", func(t *testing.T) {
 			host, status := test.NewTestHost(basicConfig)
 			defer host.Reset()
 			require.Equal(t, types.OnPluginStartStatusOK, status)
 
-			// 先设置请求头
-			host.CallOnHttpRequestHeaders([][2]string{
-				{":authority", "example.com"},
-				{":path", "/v1/chat/completions"},
-				{":method", "POST"},
-				{"x-mse-consumer", "consumer1"},
+			allowCompletionRequest(t, host)
+			action := host.CallOnHttpResponseHeaders([][2]string{
+				{":status", "200"},
+				{"content-type", "application/json"},
 			})
-
-			// 测试流式响应体处理
-			data := []byte(`{"choices": [{"delta": {"content": "Hello"}}]}`)
-			action := host.CallOnHttpStreamingResponseBody(data, false)
-
 			require.Equal(t, types.ActionContinue, action)
-			result := host.GetResponseBody()
-			// 非结束流应该返回原始数据
-			require.Equal(t, data, result)
 
-			// 测试结束流
-			action = host.CallOnHttpStreamingResponseBody(data, true)
-
+			firstChunk := []byte(`{"model":"gpt-4","choices":[],"usage":{"prompt_tokens":10,`)
+			lastChunk := []byte(`"completion_tokens":15,"total_tokens":25}}`)
+			action = host.CallOnHttpStreamingResponseBody(firstChunk, false)
+			require.Equal(t, types.ActionPause, action)
+			action = host.CallOnHttpStreamingResponseBody(lastChunk, true)
 			require.Equal(t, types.ActionContinue, action)
-			result = host.GetResponseBody()
-			// 结束流应该返回原始数据
-			require.Equal(t, data, result)
+			expectedBody := append(append([]byte{}, firstChunk...), lastChunk...)
+			require.Equal(t, expectedBody, host.GetResponseBody())
 
-			// 模拟Redis调用响应（减少配额）
-			resp := test.CreateRedisRespArray([]interface{}{30})
-			host.CallOnRedisCall(0, resp)
+			// Consume the pending response from the quota-decrement Redis callout.
+			host.CallOnRedisCall(0, test.CreateRedisResp(975))
 
 			host.CompleteHttp()
 		})
+	})
+}
 
-		// 测试非聊天完成模式的流式响应体处理
-		t.Run("non-chat completion mode", func(t *testing.T) {
+func TestOnHttpStreamingResponseBody(t *testing.T) {
+	test.RunTest(t, func(t *testing.T) {
+		t.Run("streaming response decrements only after end of stream", func(t *testing.T) {
 			host, status := test.NewTestHost(basicConfig)
 			defer host.Reset()
 			require.Equal(t, types.OnPluginStartStatusOK, status)
 
-			// 先设置请求头
-			host.CallOnHttpRequestHeaders([][2]string{
+			allowCompletionRequest(t, host)
+			action := host.CallOnHttpResponseHeaders([][2]string{
+				{":status", "200"},
+				{"content-type", "Text/Event-Stream; charset=utf-8"},
+			})
+			require.Equal(t, types.ActionContinue, action)
+
+			contentChunk := []byte("data: {\"model\":\"gpt-4\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")
+			usageChunk := []byte("data: {\"model\":\"gpt-4\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":15,\"total_tokens\":25}}\n\n")
+			doneChunk := []byte("data: [DONE]\n\n")
+
+			action = host.CallOnHttpStreamingResponseBody(contentChunk, false)
+			require.Equal(t, types.ActionContinue, action)
+			require.Equal(t, contentChunk, host.GetResponseBody())
+			action = host.CallOnHttpStreamingResponseBody(usageChunk, false)
+			require.Equal(t, types.ActionContinue, action)
+			require.Equal(t, usageChunk, host.GetResponseBody())
+			action = host.CallOnHttpStreamingResponseBody(doneChunk, true)
+			require.Equal(t, types.ActionContinue, action)
+			require.Equal(t, doneChunk, host.GetResponseBody())
+
+			host.CallOnRedisCall(0, test.CreateRedisResp(975))
+			host.CompleteHttp()
+		})
+
+		t.Run("non-completion response body remains unchanged", func(t *testing.T) {
+			host, status := test.NewTestHost(basicConfig)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			action := host.CallOnHttpRequestHeaders([][2]string{
 				{":authority", "example.com"},
 				{":path", "/other/path"},
 				{":method", "GET"},
 				{"x-mse-consumer", "consumer1"},
 			})
-
-			// 测试流式响应体处理
-			data := []byte("response data")
-			action := host.CallOnHttpStreamingResponseBody(data, false)
-
-			// 非聊天完成模式应该返回原始数据
 			require.Equal(t, types.ActionContinue, action)
-			result := host.GetResponseBody()
-			require.Equal(t, data, result)
+			action = host.CallOnHttpResponseHeaders([][2]string{
+				{":status", "200"},
+				{"content-type", "application/json"},
+			})
+			require.Equal(t, types.ActionContinue, action)
+
+			data := []byte("response data")
+			action = host.CallOnHttpStreamingResponseBody(data, false)
+			require.Equal(t, types.ActionContinue, action)
+			require.Equal(t, data, host.GetResponseBody())
+			host.CompleteHttp()
 		})
 
 		t.Run("amount mode emits interrupted usage event on stream done when usage was captured", func(t *testing.T) {
@@ -522,11 +674,96 @@ func TestOnHttpStreamingResponseBody(t *testing.T) {
 	})
 }
 
+func TestProcessResponseUsage(t *testing.T) {
+	test.RunGoTest(t, func(t *testing.T) {
+		host, status := test.NewTestHost(basicConfig)
+		defer host.Reset()
+		require.Equal(t, types.OnPluginStartStatusOK, status)
+
+		body := []byte(`{"model":"gpt-4","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":15,"total_tokens":25}}`)
+
+		t.Run("dispatches one decrement for repeated callbacks", func(t *testing.T) {
+			redisClient := &recordingRedisClient{}
+			ctx := newRecordingHTTPContext(ChatModeCompletion, "consumer1")
+			config := QuotaConfig{RedisKeyPrefix: "chat_quota:", redisClient: redisClient}
+
+			processResponseUsage(ctx, config, body, true)
+			processResponseUsage(ctx, config, body, true)
+
+			require.Equal(t, []redisDecrement{{key: "chat_quota:consumer1", delta: 25}}, redisClient.decrements)
+			require.Equal(t, true, ctx.GetContext(ctxKeyQuotaDeducted))
+		})
+
+		t.Run("streaming usage waits for end of stream", func(t *testing.T) {
+			redisClient := &recordingRedisClient{}
+			ctx := newRecordingHTTPContext(ChatModeCompletion, "consumer1")
+			config := QuotaConfig{RedisKeyPrefix: "chat_quota:", redisClient: redisClient}
+
+			processResponseUsage(ctx, config, body, false)
+			require.Empty(t, redisClient.decrements)
+			processResponseUsage(ctx, config, []byte("data: [DONE]\n\n"), true)
+
+			require.Equal(t, []redisDecrement{{key: "chat_quota:consumer1", delta: 25}}, redisClient.decrements)
+		})
+
+		t.Run("synchronous dispatch failure can retry", func(t *testing.T) {
+			redisClient := &recordingRedisClient{err: errors.New("dispatch failed")}
+			ctx := newRecordingHTTPContext(ChatModeCompletion, "consumer1")
+			config := QuotaConfig{RedisKeyPrefix: "chat_quota:", redisClient: redisClient}
+
+			processResponseUsage(ctx, config, body, true)
+			require.Equal(t, []redisDecrement{{key: "chat_quota:consumer1", delta: 25}}, redisClient.decrements)
+			require.Equal(t, false, ctx.GetContext(ctxKeyQuotaDeducted))
+
+			redisClient.err = nil
+			processResponseUsage(ctx, config, body, true)
+			require.Equal(t, []redisDecrement{
+				{key: "chat_quota:consumer1", delta: 25},
+				{key: "chat_quota:consumer1", delta: 25},
+			}, redisClient.decrements)
+			require.Equal(t, true, ctx.GetContext(ctxKeyQuotaDeducted))
+		})
+
+		t.Run("does not decrement without usage", func(t *testing.T) {
+			redisClient := &recordingRedisClient{}
+			ctx := newRecordingHTTPContext(ChatModeCompletion, "consumer1")
+			config := QuotaConfig{RedisKeyPrefix: "chat_quota:", redisClient: redisClient}
+
+			processResponseUsage(ctx, config, []byte(`{"choices":[]}`), true)
+
+			require.Empty(t, redisClient.decrements)
+			require.Nil(t, ctx.GetContext(ctxKeyQuotaDeducted))
+		})
+
+		t.Run("does not decrement without consumer", func(t *testing.T) {
+			redisClient := &recordingRedisClient{}
+			ctx := newRecordingHTTPContext(ChatModeCompletion, "")
+			config := QuotaConfig{RedisKeyPrefix: "chat_quota:", redisClient: redisClient}
+
+			processResponseUsage(ctx, config, body, true)
+
+			require.Empty(t, redisClient.decrements)
+			require.Nil(t, ctx.GetContext(ctxKeyQuotaDeducted))
+		})
+	})
+}
+
+func TestOnHttpResponseHeadersSkipsNonCompletionBody(t *testing.T) {
+	ctx := newRecordingHTTPContext(ChatModeNone, "consumer1")
+
+	action := onHttpResponseHeaders(ctx, QuotaConfig{})
+
+	require.Equal(t, types.ActionContinue, action)
+	require.True(t, ctx.skippedBody)
+	require.False(t, ctx.bufferedBody)
+}
+
 func TestGetOperationMode(t *testing.T) {
 	tests := []struct {
 		name      string
 		path      string
 		adminPath string
+		suffixes  []string
 		chatMode  ChatMode
 		adminMode AdminMode
 	}{
@@ -534,6 +771,7 @@ func TestGetOperationMode(t *testing.T) {
 			name:      "chat completion mode",
 			path:      "/v1/chat/completions",
 			adminPath: "/quota",
+			suffixes:  []string{"/v1/chat/completions", "/v1/messages", "/v1/completions", "/v1/responses", "/v1/embeddings", "/v1/images/generations"},
 			chatMode:  ChatModeCompletion,
 			adminMode: AdminModeNone,
 		},
@@ -541,6 +779,7 @@ func TestGetOperationMode(t *testing.T) {
 			name:      "admin query mode",
 			path:      "/v1/chat/completions/quota",
 			adminPath: "/quota",
+			suffixes:  []string{"/v1/chat/completions", "/v1/messages", "/v1/completions", "/v1/responses", "/v1/embeddings", "/v1/images/generations"},
 			chatMode:  ChatModeAdmin,
 			adminMode: AdminModeQuery,
 		},
@@ -548,6 +787,7 @@ func TestGetOperationMode(t *testing.T) {
 			name:      "admin refresh mode",
 			path:      "/v1/chat/completions/quota/refresh",
 			adminPath: "/quota",
+			suffixes:  []string{"/v1/chat/completions", "/v1/messages", "/v1/completions", "/v1/responses", "/v1/embeddings", "/v1/images/generations"},
 			chatMode:  ChatModeAdmin,
 			adminMode: AdminModeRefresh,
 		},
@@ -555,13 +795,47 @@ func TestGetOperationMode(t *testing.T) {
 			name:      "admin delta mode",
 			path:      "/v1/chat/completions/quota/delta",
 			adminPath: "/quota",
+			suffixes:  []string{"/v1/chat/completions", "/v1/messages", "/v1/completions", "/v1/responses", "/v1/embeddings", "/v1/images/generations"},
 			chatMode:  ChatModeAdmin,
 			adminMode: AdminModeDelta,
+		},
+		{
+			name:      "anthropic messages completion mode",
+			path:      "/v1/messages",
+			adminPath: "/quota",
+			suffixes:  []string{"/v1/chat/completions", "/v1/messages", "/v1/completions", "/v1/responses", "/v1/embeddings", "/v1/images/generations"},
+			chatMode:  ChatModeCompletion,
+			adminMode: AdminModeNone,
+		},
+		{
+			name:      "custom suffix completion mode",
+			path:      "/llm/invoke",
+			adminPath: "/quota",
+			suffixes:  []string{"/invoke"},
+			chatMode:  ChatModeCompletion,
+			adminMode: AdminModeNone,
+		},
+		{
+			name:      "admin path fixed to chat completions",
+			path:      "/v1/chat/completions/quota",
+			adminPath: "/quota",
+			suffixes:  []string{"/invoke"},
+			chatMode:  ChatModeAdmin,
+			adminMode: AdminModeQuery,
+		},
+		{
+			name:      "messages admin path not supported",
+			path:      "/v1/messages/quota",
+			adminPath: "/quota",
+			suffixes:  []string{"/v1/chat/completions", "/v1/messages", "/v1/completions", "/v1/responses", "/v1/embeddings", "/v1/images/generations"},
+			chatMode:  ChatModeNone,
+			adminMode: AdminModeNone,
 		},
 		{
 			name:      "none mode",
 			path:      "/other/path",
 			adminPath: "/quota",
+			suffixes:  []string{"/v1/chat/completions", "/v1/messages", "/v1/completions", "/v1/responses", "/v1/embeddings", "/v1/images/generations"},
 			chatMode:  ChatModeNone,
 			adminMode: AdminModeNone,
 		},
@@ -569,6 +843,7 @@ func TestGetOperationMode(t *testing.T) {
 			name:      "image generation mode",
 			path:      "/v1/images/generations",
 			adminPath: "/quota",
+			suffixes:  []string{"/v1/images/generations"},
 			chatMode:  ChatModeCompletion,
 			adminMode: AdminModeNone,
 		},
@@ -576,7 +851,7 @@ func TestGetOperationMode(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			chatMode, adminMode := getOperationMode(tt.path, tt.adminPath)
+			chatMode, adminMode := getOperationMode(tt.path, tt.adminPath, tt.suffixes)
 			require.Equal(t, tt.chatMode, chatMode)
 			require.Equal(t, tt.adminMode, adminMode)
 		})

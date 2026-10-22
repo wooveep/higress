@@ -27,7 +27,6 @@ import (
 	gw "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayx "sigs.k8s.io/gateway-api/apisx/v1alpha1"
 
-	higressconstants "github.com/alibaba/higress/v2/pkg/config/constants"
 	networking "istio.io/api/networking/v1alpha3"
 	networkingclient "istio.io/client-go/pkg/apis/networking/v1"
 	kubesecrets "istio.io/istio/pilot/pkg/credentials/kube"
@@ -45,6 +44,8 @@ import (
 	"istio.io/istio/pkg/ptr"
 	"istio.io/istio/pkg/slices"
 	"istio.io/istio/pkg/util/sets"
+
+	"github.com/alibaba/higress/v2/pkg/ingress/kube/util"
 )
 
 type TypedNamespacedName struct {
@@ -264,6 +265,16 @@ func DestinationRuleCollection(
 				spec.TrafficPolicy.PortLevelSettings = append(spec.TrafficPolicy.PortLevelSettings, portPolicy)
 			}
 
+			// Start - Added by Higress
+			// A rule that cannot be inspected has to be dropped: it is about to be stamped
+			// with target.Namespace while carrying values written by whichever policies won
+			// the merge, so anything left unchecked would be resolved as if target.Namespace
+			// had written it.
+			if err := defuseBackendPolicySecretTemplates(spec, target); err != nil {
+				return nil
+			}
+			// End - Added by Higress
+
 			cfg := &config.Config{
 				Meta: config.Meta{
 					GroupVersionKind: gvk.DestinationRule,
@@ -279,6 +290,24 @@ func DestinationRuleCollection(
 		}, opts.WithName("BackendPolicyMerged")...)
 	return merged
 }
+
+// Start - Added by Higress
+
+// defuseBackendPolicySecretTemplates restricts the secret references in a DestinationRule
+// merged from backend policies to the namespace of the policy target. Every policy merged
+// under one target is a local policy attached to it, so they all come from that namespace,
+// and it is the namespace the generated rule is stamped with.
+//
+// The restriction has to happen here because the merge discards the identities of the
+// policies that supplied each setting, keeping them only in an annotation that template
+// resolution never reads.
+func defuseBackendPolicySecretTemplates(spec *networking.DestinationRule, target TypedNamespacedName) error {
+	_, err := util.DefuseSpecTemplates(spec, target.Namespace,
+		fmt.Sprintf("DestinationRule for %s", target))
+	return err
+}
+
+// End - Added by Higress
 
 func BackendTLSPolicyCollection(
 	tlsPolicies krt.Collection[*gw.BackendTLSPolicy],
@@ -425,7 +454,7 @@ func BackendTLSPolicyCollection(
 				Kind:  ptr.Of(gw.Kind(gvk.KubernetesGateway.Kind)),
 				Name:  gw.ObjectName(g.Name),
 			}
-			ancestorStatus = append(ancestorStatus, setAncestorStatus(pr, status, i.Generation, conds, gw.GatewayController(higressconstants.ManagedGatewayController)))
+			ancestorStatus = append(ancestorStatus, setAncestorStatus(pr, status, i.Generation, conds, gw.GatewayController(managedGatewayController)))
 		}
 		status.Ancestors = mergeAncestors(status.Ancestors, ancestorStatus)
 		return status, res
@@ -635,14 +664,16 @@ func parentRefEqual(a, b gw.ParentReference) bool {
 		ptr.Equal(a.Port, b.Port)
 }
 
-var outControllers = sets.New(gw.GatewayController(higressconstants.ManagedGatewayController), constants.ManagedGatewayMeshController)
+func isOutController(controller gw.GatewayController) bool {
+	return controller == managedGatewayController || controller == constants.ManagedGatewayMeshController
+}
 
 // mergeAncestors merges an existing ancestor with in incoming one. We preserve order, prune stale references set by our controller,
 // and add any new references from our controller.
 func mergeAncestors(existing []gw.PolicyAncestorStatus, incoming []gw.PolicyAncestorStatus) []gw.PolicyAncestorStatus {
 	n := 0
 	for _, x := range existing {
-		if !outControllers.Contains(x.ControllerName) {
+		if !isOutController(x.ControllerName) {
 			// Keep it as-is
 			existing[n] = x
 			n++

@@ -20,7 +20,7 @@ Plugin Execution Priority: `360`
 | --- | --- | --- | --- | --- |
 | `http_service` | object | Yes | - | Configuration for the external authorization service |
 | `match_type` | string | No |  | Can be `whitelist` or `blacklist` |
-| `match_list` | array of MatchRule | No |  | A list containing (`match_rule_domain`, `match_rule_path`, `match_rule_type`) |
+| `match_list` | array of MatchRule | No |  | Request matching rules for domains, methods, paths, and request-header presence |
 | `failure_mode_allow` | bool | No | false | When set to true, client requests will be accepted even if the communication with the authorization service fails or the authorization service returns an HTTP 5xx error |
 | `failure_mode_allow_header_add` | bool | No | false | When both `failure_mode_allow` and `failure_mode_allow_header_add` are set to true, if the communication with the authorization service fails or the authorization service returns an HTTP 5xx error, the `x-envoy-auth-failure-mode-allowed: true` header will be added to the request header |
 | `status_on_error` | int | No | 403 | Sets the HTTP status code returned to the client when the authorization service is inaccessible or has a 5xx status code. The default status code is `403` |
@@ -51,9 +51,18 @@ Configuration fields for each item in `authorization_request`
 | Name | Data Type | Required | Default Value | Description |
 | --- | --- | --- | --- | --- |
 | `allowed_headers` | array of StringMatcher | No | - | After setting, the client request headers that match the items will be added to the request headers in the authorization service request. In addition to the user-defined header matching rules, the `Authorization` HTTP header will be automatically included in the authorization service request (when `endpoint_mode` is `forward_auth`, the `X-Forwarded-*` request headers will be added) |
+| `allowed_properties` | array of AllowedProperty | No | - | When set, Envoy filter state properties will be mapped to HTTP headers and sent to the authorization service.<br>Check out following documents for the property list supported by Envoy:<br><ul><li>Envoy 1.27 (Higress < 2.2.0): https://www.envoyproxy.io/docs/envoy/v1.27.0/intro/arch_overview/advanced/attributes</li><li>Envoy 1.36 (Higress >= 2.2.0): https://www.envoyproxy.io/docs/envoy/v1.36.0/intro/arch_overview/advanced/attributes</li></ul> |
+
 | `headers_to_add` | map[string]string | No | - | Sets the list of request headers to be included in the authorization service request. Please note that the client request headers with the same name will be overwritten |
 | `with_request_body` | bool | No | false | Buffer the client request body and send it to the authentication request (not effective for HTTP Method GET, OPTIONS, HEAD requests) |
 | `max_request_body_bytes` | int | No | 10MB | Sets the maximum size of the client request body to be saved in memory. When the client request body reaches the value set in this field, an HTTP 413 status code will be returned and the authorization process will not be started. Note that this setting takes precedence over the `failure_mode_allow` configuration |
+
+Configuration fields for each item of `AllowedProperty` type
+
+| Name | Data Type | Required | Default Value | Description |
+| --- | --- | --- | --- | --- |
+| `path` | array of string | Yes | - | Property path, e.g., `["route_name"]` or `["metadata", "user_id"]` |
+| `header` | string | Yes | - | The request header name to map the property to |
 
 Configuration fields for each item in `authorization_response`
 
@@ -80,10 +89,18 @@ Configuration fields for each item of `MatchRule` type. When using `array of Mat
 | `match_rule_method` | []string | No | - | Matching rule for the request method |
 | `match_rule_path` | string | No | - | The rule for matching the request path |
 | `match_rule_type` | string | No | - | The type of the rule for matching the request path, can be `exact`, `prefix`, `suffix`, `contains`, `regex` |
+| `match_rule_headers` | array of HeaderPresenceCondition | No | - | Matches request-header presence; the array must not be empty and every condition in the rule must match |
+
+Configuration fields for each item of `HeaderPresenceCondition` type:
+
+| Name | Data Type | Required | Default Value | Description |
+| --- | --- | --- | --- | --- |
+| `name` | string | Yes | - | An HTTP request-header name, matched case-insensitively. Case-insensitive duplicates within one rule are not allowed |
+| `exists` | bool | Yes | - | `true` requires the header to be present and `false` requires it to be absent. A header with an empty value is still present |
 
 ### Differences between the two `endpoint_mode`
 
-When `endpoint_mode` is `envoy`, the authentication request will use the original request's HTTP Method and the configured `path_prefix` as the request path prefix, concatenated with the original request path.
+When `endpoint_mode` is `envoy`, the authentication request will use the original request's HTTP Method and the configured `path_prefix` as the request path prefix, concatenated with the original request path. Only the path portion of the original request path is concatenated, so dot segments inside a query value are never resolved as path segments. `path_prefix` must be an absolute, canonical path: if the request path resolves outside of it, contains a raw backslash, or cannot be parsed as a URL, the request is rejected with HTTP 403 (`ext-auth.path_traversal`) without calling the authorization service. `failure_mode_allow` does not apply to these rejections, since it covers an unreachable authorization service rather than a request that cannot be authorized at all.
 
 When `endpoint_mode` is `forward_auth`, the authentication request will use the configured `request_method` as the HTTP Method and the configured `path` as the request path. Higress will automatically generate and send the following headers to the authorization service:
 
@@ -96,7 +113,7 @@ When `endpoint_mode` is `forward_auth`, the authentication request will use the 
 
 ### Blacklist and Whitelist Modes
 
-Supports blacklist and whitelist mode configuration. The default is the whitelist mode. If the whitelist is empty, all requests need to be verified. The matching domain supports wildcard domains such as `*.bar.com`, and the matching rule supports `exact`, `prefix`, `suffix`, `contains`, `regex`.
+Supports blacklist and whitelist modes. Whitelist is the default, and an empty whitelist sends every request to external authorization. A matching `whitelist` rule bypasses authorization, while a miss executes it; a matching `blacklist` rule executes authorization, while a miss bypasses it. Domain, method, path, and header conditions within one rule are ANDed, while entries in `match_list` are ORed. Domains support wildcards such as `*.bar.com`, and paths support `exact`, `prefix`, `suffix`, `contains`, and `regex`. `authorization_request.allowed_headers` only controls which headers are forwarded to the authorization service; it does not control whether that service is called.
 
 **Whitelist Mode**
 
@@ -134,6 +151,10 @@ match_list:
   # For the domain legacy.example.com, all POST requests need verification.
   - match_rule_domain: 'legacy.example.com'
     match_rule_method: ["POST"]
+  # Requests containing the x-custom-auth header need verification.
+  - match_rule_headers:
+      - name: 'x-custom-auth'
+        exists: true
 ```
 
 
@@ -235,6 +256,53 @@ Content-Length: 0
 ```
 
 If the response headers returned by the `ext-auth` service contain `x-user-id` and `x-auth-version`, these two headers will be included in the request when the gateway calls the upstream.
+
+#### Example 3: Passing Route Name to Authorization Service
+
+Configuration of the `ext-auth` plugin:
+
+```yaml
+http_service:
+  authorization_request:
+    allowed_headers:
+      - exact: x-auth-version
+    allowed_properties:
+      - path: [route_name]
+        header: x-route-name
+    headers_to_add:
+      x-envoy-header: true
+  authorization_response:
+    allowed_upstream_headers:
+      - exact: x-user-id
+      - exact: x-auth-version
+  endpoint_mode: envoy
+  endpoint:
+    service_name: ext-auth.backend.svc.cluster.local
+    service_host: my-domain.local
+    service_port: 8090
+    path_prefix: /auth
+  timeout: 1000
+```
+
+When using the following request to the gateway after enabling the `ext-auth` plugin:
+
+```shell
+curl -X POST http://localhost:8082/users?apikey=9a342114-ba8a-11ec-b1bf-00163e1250b5 -X GET -H "foo: bar" -H "Authorization: xxx"
+```
+
+The `ext-auth` service will receive the following authorization request:
+
+```
+POST /auth/users?apikey=9a342114-ba8a-11ec-b1bf-00163e1250b5 HTTP/1.1
+Host: my-domain.local
+Authorization: xxx
+X-Auth-Version: 1.0
+x-envoy-header: true
+Content-Length: 0
+X-Route-Name: your-route-name
+```
+
+By configuring `allowed_properties`, you can map Envoy filter state properties like `route_name` to HTTP headers and send them to the authorization service, enabling the authorization service to make decisions based on routing information.
 
 ### When endpoint_mode is forward_auth
 
@@ -340,3 +408,52 @@ Content-Length: 0
 ```
 
 If the response headers returned by the `ext-auth` service contain `x-user-id` and `x-auth-version`, these two headers will be included in the request when the gateway calls the upstream.
+
+#### Example 3: Passing Route Name to Authorization Service
+
+Configuration of the `ext-auth` plugin:
+
+```yaml
+http_service:
+  authorization_request:
+    allowed_headers:
+      - exact: x-auth-version
+    allowed_properties:
+      - path: [route_name]
+        header: x-route-name
+  authorization_response:
+    allowed_upstream_headers:
+      - exact: x-mse-consumer
+      - exact: x-ext-auth-user
+  endpoint_mode: forward_auth
+  endpoint:
+    service_name: ext-auth.backend.svc.cluster.local
+    service_port: 8090
+    path: /auth
+    request_method: POST
+  timeout: 1000
+```
+
+When using the following request to the gateway after enabling the `ext-auth` plugin:
+
+```shell
+curl -i http://localhost:8082/users?apikey=9a342114-ba8a-11ec-b1bf-00163e1250b5 -X GET -H "foo: bar" -H "Authorization: xxx" -H "X-Auth-Version: 1.0" -H "Host: foo.bar.com"
+```
+
+The `ext-auth` service will receive the following authorization request:
+
+```
+POST /auth HTTP/1.1
+Host: my-domain.local
+Authorization: xxx
+X-Forwarded-Proto: HTTP
+X-Forwarded-Host: foo.bar.com
+X-Forwarded-Uri: /users?apikey=9a342114-ba8a-11ec-b1bf-00163e1250b5
+X-Forwarded-Method: GET
+X-Auth-Version: 1.0
+x-envoy-header: true
+X-Route-Name: your-route-name
+Content-Length: 0
+```
+
+By configuring `allowed_properties`, you can map Envoy filter state properties like `route_name` to HTTP headers and send them to the authorization service, enabling the authorization service to make decisions based on routing information.

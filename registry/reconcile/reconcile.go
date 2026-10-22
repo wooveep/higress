@@ -23,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	"istio.io/pkg/log"
+	"istio.io/istio/pkg/log"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	apiv1 "github.com/alibaba/higress/v2/api/networking/v1"
@@ -204,6 +204,7 @@ func (r *Reconciler) generateWatcherFromRegistryConfig(registry *apiv1.RegistryC
 			nacos.WithNacosNamespace(registry.NacosNamespace),
 			nacos.WithNacosGroups(registry.NacosGroups),
 			nacos.WithNacosRefreshInterval(registry.NacosRefreshInterval),
+			nacos.WithNacosTimeout(registry.NacosTimeout),
 			nacos.WithAuthOption(authOption),
 			nacos.WithVport(registry.Vport),
 		)
@@ -221,6 +222,7 @@ func (r *Reconciler) generateWatcherFromRegistryConfig(registry *apiv1.RegistryC
 			nacosv2.WithNacosNamespace(registry.NacosNamespace),
 			nacosv2.WithNacosGroups(registry.NacosGroups),
 			nacosv2.WithNacosRefreshInterval(registry.NacosRefreshInterval),
+			nacosv2.WithNacosTimeout(registry.NacosTimeout),
 			nacosv2.WithMcpExportDomains(registry.McpServerExportDomains),
 			nacosv2.WithMcpBaseUrl(registry.McpServerBaseUrl),
 			nacosv2.WithEnableMcpServer(registry.EnableMCPServer),
@@ -361,7 +363,11 @@ func (r *Reconciler) reconcileProxies(proxies []*apiv1.ProxyConfig) error {
 		needNotify = true
 	}
 	for k, v := range toBeUpdated {
-		proxyWrapper := proxy.BuildProxyWrapper(v)
+		proxyWrapper, err := proxy.BuildProxyWrapper(v)
+		if err != nil {
+			log.Errorf("Failed to build proxy wrapper for %s, skipping it: %v", k, err)
+			continue
+		}
 		if proxyWrapper == nil {
 			continue
 		}

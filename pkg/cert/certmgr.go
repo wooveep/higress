@@ -17,14 +17,12 @@ package cert
 import (
 	"context"
 	"fmt"
-	"os"
 	"reflect"
 	"sync"
 
 	"github.com/caddyserver/certmagic"
 	"github.com/mholt/acmez"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 	istiomodel "istio.io/istio/pilot/pkg/model"
 	"k8s.io/client-go/kubernetes"
 )
@@ -60,11 +58,7 @@ func InitCertMgr(opts *Option, clientSet kubernetes.Interface, config *Config, X
 	var storage certmagic.Storage
 	storage, _ = NewConfigmapStorage(opts.Namespace, clientSet)
 	renewalWindowRatio := float64(config.RenewBeforeDays) / float64(RenewMaxDays)
-	logger := zap.New(zapcore.NewCore(
-		zapcore.NewConsoleEncoder(zap.NewProductionEncoderConfig()),
-		os.Stderr,
-		zap.DebugLevel,
-	))
+	logger := zap.L()
 	magicConfig := certmagic.Config{
 		RenewalWindowRatio: renewalWindowRatio,
 		Storage:            storage,
@@ -223,12 +217,35 @@ func (s *CertMgr) OnEvent(ctx context.Context, event string, data map[string]any
 	*/
 	if event == EventCertObtained {
 		// obtain certificate and update secret
-		domain := data["identifier"].(string)
-		isRenew := data["renewal"].(bool)
-		privateKeyPath := data["private_key_path"].(string)
-		certificatePath := data["certificate_path"].(string)
+		domain, ok := data["identifier"].(string)
+		if !ok {
+			CertLog.Errorf("missing or invalid identifier in cert event data: %+v", data)
+			return nil
+		}
+		isRenew, ok := data["renewal"].(bool)
+		if !ok {
+			isRenew = false
+		}
+		privateKeyPath, ok := data["private_key_path"].(string)
+		if !ok {
+			CertLog.Errorf("missing or invalid private_key_path in cert event data: %+v", data)
+			return nil
+		}
+		certificatePath, ok := data["certificate_path"].(string)
+		if !ok {
+			CertLog.Errorf("missing or invalid certificate_path in cert event data: %+v", data)
+			return nil
+		}
 		privateKey, err := s.cfg.Storage.Load(context.Background(), privateKeyPath)
+		if err != nil {
+			CertLog.Errorf("failed to load private key for domain %s from path %s: %v", domain, privateKeyPath, err)
+			return err
+		}
 		certificate, err := s.cfg.Storage.Load(context.Background(), certificatePath)
+		if err != nil {
+			CertLog.Errorf("failed to load certificate for domain %s from path %s: %v", domain, certificatePath, err)
+			return err
+		}
 		certChain, err := parseCertsFromPEMBundle(certificate)
 		if err != nil {
 			return err

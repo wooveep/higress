@@ -20,7 +20,7 @@ description: Ext 认证插件实现了调用外部授权服务进行认证鉴权
 | ------------------------------- | ------------------ | ---- | ------ | ------------------------------------------------------------ |
 | `http_service`                  | object             | 是   | -      | 外部授权服务配置                                             |
 | `match_type`                    | string             | 否   |        | 可选 `whitelist` 或 `blacklist`                              |
-| `match_list`                    | array of MatchRule | 否   |        | 一个包含 (`match_rule_domain`, `match_rule_path`, `match_rule_type`) 的列表 |
+| `match_list`                    | array of MatchRule | 否   |        | 请求匹配规则列表，支持按域名、方法、路径和请求头是否存在进行匹配 |
 | `failure_mode_allow`            | bool               | 否   | false  | 当设置为 true 时，即使与授权服务的通信失败，或者授权服务返回了 HTTP 5xx 错误，仍会接受客户端请求 |
 | `failure_mode_allow_header_add` | bool               | 否   | false  | 当 `failure_mode_allow` 和 `failure_mode_allow_header_add` 都设置为 true 时，若与授权服务的通信失败，或授权服务返回了 HTTP 5xx 错误，那么请求头中将会添加 `x-envoy-auth-failure-mode-allowed: true` |
 | `status_on_error`               | int                | 否   | 403    | 当授权服务无法访问或状态码为 5xx 时，设置返回给客户端的 HTTP 状态码。默认状态码是 `403` |
@@ -51,9 +51,17 @@ description: Ext 认证插件实现了调用外部授权服务进行认证鉴权
 | 名称                     | 数据类型               | 必填 | 默认值 | 描述                                                         |
 |--------------------------|------------------------|------|--------|--------------------------------------------------------------|
 | `allowed_headers`        | array of StringMatcher | 否   | -      | 设置后，匹配项的客户端请求头将添加到授权服务请求中的请求头中。除了用户自定义的头部匹配规则外，授权服务请求中会自动包含 `Authorization` 这个HTTP头（`endpoint_mode` 为 `forward_auth` 时，会添加 `X-Forwarded-*` 的请求头） |
+| `allowed_properties`     | array of AllowedProperty | 否   | -      | 设置后将把 Envoy filter state 中的 property 映射为 HTTP header 发送给授权服务。<br>Envoy 支持的 property 列表参见下方文档：<br><ul><li>Envoy 1.27（Higress < 2.2.0）：https://www.envoyproxy.io/docs/envoy/v1.27.0/intro/arch_overview/advanced/attributes</li><li>Envoy 1.36（Higress >= 2.2.0）：https://www.envoyproxy.io/docs/envoy/v1.36.0/intro/arch_overview/advanced/attributes</li></ul> |
 | `headers_to_add`         | map[string]string      | 否   | -      | 设置将包含在授权服务请求中的请求头列表。请注意，同名的客户端请求头将被覆盖 |
 | `with_request_body`      | bool                   | 否   | false  | 缓冲客户端请求体，并将其发送至鉴权请求中（HTTP Method为GET、OPTIONS、HEAD请求时不生效） |
 | `max_request_body_bytes` | int                    | 否   | 10MB   | 设置在内存中保存客户端请求体的最大尺寸。当客户端请求体达到在此字段中设置的数值时，将会返回HTTP 413状态码，并且不会启动授权过程。注意，这个设置会优先于 `failure_mode_allow` 的配置 |
+
+`AllowedProperty` 类型每一项的配置字段说明
+
+| 名称       | 数据类型 | 必填 | 默认值 | 描述                                                         |
+|------------|----------|------|--------|--------------------------------------------------------------|
+| `path`     | array of string | 是   | -      | 属性路径，如 `["route_name"]` 或 `["metadata", "user_id"]` |
+| `header`   | string   | 是   | -      | 映射到的请求头名称                                           |
 
 `authorization_response` 中每一项的配置字段说明
 
@@ -80,10 +88,18 @@ MatchRule 类型每一项的配置字段说明，在使用 `array of MatchRule` 
 | `match_rule_method` | []string | 否   | -      | 匹配请求方法                                                 |
 | `match_rule_path`   | string   | 否   | -      | 匹配请求路径的规则                                           |
 | `match_rule_type`   | string   | 否   | -      | 匹配请求路径的规则类型，可选 `exact` , `prefix` , `suffix`, `contains`, `regex` |
+| `match_rule_headers` | array of HeaderPresenceCondition | 否 | - | 按请求头是否存在进行匹配；数组不能为空，同一规则中的所有条件必须同时满足 |
+
+`HeaderPresenceCondition` 类型每一项的配置字段说明：
+
+| 名称     | 数据类型 | 必填 | 默认值 | 描述 |
+|----------|----------|------|--------|------|
+| `name`   | string   | 是   | -      | HTTP 请求头名称，忽略大小写；同一规则中不能配置大小写不同的重复名称 |
+| `exists` | bool     | 是   | -      | `true` 表示请求头存在，`false` 表示请求头不存在；请求头值为空字符串时仍视为存在 |
 
 ### 两种 `endpoint_mode` 的区别
 
-`endpoint_mode` 为 `envoy` 时，鉴权请求会使用原始请求的 HTTP Method，和配置的 `path_prefix` 作为请求路径前缀拼接上原始的请求路径
+`endpoint_mode` 为 `envoy` 时，鉴权请求会使用原始请求的 HTTP Method，和配置的 `path_prefix` 作为请求路径前缀拼接上原始的请求路径。拼接时只使用原始请求路径中 `?` 之前的部分，因此查询参数取值里的 `..` 不会被当作路径段解析。`path_prefix` 必须是绝对且规范的路径：若请求路径解析后超出 `path_prefix`、包含反斜杠（`\`），或无法被解析为合法的 URL，则不会调用鉴权服务，直接返回 HTTP 403（`ext-auth.path_traversal`）。这类拒绝不会应用 `failure_mode_allow` 配置，因为该配置针对的是鉴权服务不可用，而不是根本无法完成鉴权的请求。
 
 `endpoint_mode` 为 `forward_auth` 时，鉴权请求会使用配置的 `request_method` 作为 HTTP Method，和配置的 `path` 作为请求路径，并且 Higress 会自动生成并发送以下 header 至鉴权服务：
 
@@ -96,7 +112,7 @@ MatchRule 类型每一项的配置字段说明，在使用 `array of MatchRule` 
 
 ### 黑白名单模式
 
-支持黑白名单模式配置，默认为白名单模式，白名单为空，即所有请求都需要经过验证，匹配域名支持泛域名例如 `*.bar.com` ，匹配规则支持 `exact` , `prefix` , `suffix`, `contains`, `regex`
+支持黑白名单模式配置，默认为白名单模式，白名单为空时所有请求都需要鉴权。`whitelist` 规则匹配时跳过鉴权、不匹配时执行鉴权；`blacklist` 规则匹配时执行鉴权、不匹配时跳过鉴权。一个规则内的域名、方法、路径和请求头条件之间为 AND，`match_list` 中的规则之间为 OR。匹配域名支持 `*.bar.com` 等泛域名，路径支持 `exact`、`prefix`、`suffix`、`contains`、`regex`。`authorization_request.allowed_headers` 仅控制转发给鉴权服务的请求头，与是否调用鉴权服务无关。
 
 **白名单模式**
 
@@ -134,6 +150,10 @@ match_list:
   # 所有以 legacy.example.com 为域名的 POST 请求需要验证
   - match_rule_domain: 'legacy.example.com'
     match_rule_method: ["POST"]
+  # 所有包含 x-custom-auth 请求头的请求需要验证
+  - match_rule_headers:
+      - name: 'x-custom-auth'
+        exists: true
 ```
 
 ## 配置示例
@@ -235,7 +255,52 @@ Content-Length: 0
 
 `ext-auth` 服务返回响应头中如果包含 `x-user-id` 和 `x-auth-version`，网关调用upstream时的请求中会带上这两个请求头
 
+#### 示例3：传递路由名称到授权服务
 
+`ext-auth` 插件的配置：
+
+```yaml
+http_service:
+  authorization_request:
+    allowed_headers:
+      - exact: x-auth-version
+    allowed_properties:
+      - path: [route_name]
+        header: x-route-name
+    headers_to_add:
+      x-envoy-header: true
+  authorization_response:
+    allowed_upstream_headers:
+      - exact: x-user-id
+      - exact: x-auth-version
+  endpoint_mode: envoy
+  endpoint:
+    service_name: ext-auth.backend.svc.cluster.local
+    service_host: my-domain.local
+    service_port: 8090
+    path_prefix: /auth
+  timeout: 1000
+```
+
+使用如下请求网关，当开启 `ext-auth` 插件后：
+
+```shell
+curl -X POST http://localhost:8082/users?apikey=9a342114-ba8a-11ec-b1bf-00163e1250b5 -X GET -H "foo: bar" -H "Authorization: xxx"
+```
+
+`ext-auth` 服务将接收到如下的鉴权请求：
+
+```
+POST /auth/users?apikey=9a342114-ba8a-11ec-b1bf-00163e1250b5 HTTP/1.1
+Host: my-domain.local
+Authorization: xxx
+X-Auth-Version: 1.0
+x-envoy-header: true
+Content-Length: 0
+X-Route-Name: your-route-name
+```
+
+通过 `allowed_properties` 配置，可以将 Envoy filter state 中的 `route_name` 等属性映射为 HTTP header 发送给授权服务，便于授权服务根据路由信息进行鉴权决策。
 
 ### endpoint_mode为forward_auth时
 
@@ -341,3 +406,52 @@ Content-Length: 0
 ```
 
 `ext-auth` 服务返回响应头中如果包含 `x-user-id` 和 `x-auth-version`，网关调用upstream时的请求中会带上这两个请求头
+
+#### 示例3：传递路由名称到授权服务
+
+`ext-auth` 插件的配置：
+
+```yaml
+http_service:
+  authorization_request:
+    allowed_headers:
+      - exact: x-auth-version
+    allowed_properties:
+      - path: [route_name]
+        header: x-route-name
+  authorization_response:
+    allowed_upstream_headers:
+      - exact: x-mse-consumer
+      - exact: x-ext-auth-user
+  endpoint_mode: forward_auth
+  endpoint:
+    service_name: ext-auth.backend.svc.cluster.local
+    service_port: 8090
+    path: /auth
+    request_method: POST
+  timeout: 1000
+```
+
+使用如下请求网关，当开启 `ext-auth` 插件后：
+
+```shell
+curl -i http://localhost:8082/users?apikey=9a342114-ba8a-11ec-b1bf-00163e1250b5 -X GET -H "foo: bar" -H "Authorization: xxx" -H "X-Auth-Version: 1.0" -H "Host: foo.bar.com"
+```
+
+`ext-auth` 服务将接收到如下的鉴权请求：
+
+```
+POST /auth HTTP/1.1
+Host: my-domain.local
+Authorization: xxx
+X-Forwarded-Proto: HTTP
+X-Forwarded-Host: foo.bar.com
+X-Forwarded-Uri: /users?apikey=9a342114-ba8a-11ec-b1bf-00163e1250b5
+X-Forwarded-Method: GET
+X-Auth-Version: 1.0
+x-envoy-header: true
+X-Route-Name: your-route-name
+Content-Length: 0
+```
+
+通过 `allowed_properties` 配置，可以将 Envoy filter state 中的 `route_name` 等属性映射为 HTTP header 发送给授权服务，便于授权服务根据路由信息进行鉴权决策。

@@ -5,13 +5,16 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-proxy/config"
 	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-proxy/provider"
 	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-proxy/util"
+	"github.com/alibaba/higress/plugins/wasm-go/pkg/jsonbody"
 
 	"github.com/higress-group/wasm-go/pkg/log"
 	"github.com/higress-group/wasm-go/pkg/wrapper"
@@ -25,12 +28,17 @@ import (
 const (
 	pluginName = "ai-proxy"
 
-	defaultMaxBodyBytes uint32 = 100 * 1024 * 1024
+	defaultMaxBodyBytes             uint32 = 100 * 1024 * 1024
+	errorResponseBodyBufferLimit    uint32 = 64 * 1024
+	maxLoggedErrorResponseBodyBytes        = 16 * 1024
 
-	ctxOriginalPath = "original_path"
-	ctxOriginalHost = "original_host"
-	ctxOriginalAuth = "original_auth"
+	ctxOriginalPath                = "original_path"
+	ctxOriginalHost                = "original_host"
+	ctxOriginalAuth                = "original_auth"
+	ctxUpstreamErrorResponseStatus = "upstream_error_response_status"
 )
+
+const headerContentLength = "Content-Length"
 
 type pair[K, V any] struct {
 	key   K
@@ -65,10 +73,14 @@ var (
 		{provider.PathOpenAIResponses, provider.ApiNameResponses},
 		{provider.PathOpenAIVideos, provider.ApiNameVideos},
 		// Anthropic style
+		{provider.PathAnthropicMessagesCountTokens, provider.ApiNameAnthropicCountTokens},
 		{provider.PathAnthropicMessages, provider.ApiNameAnthropicMessages},
 		{provider.PathAnthropicComplete, provider.ApiNameAnthropicComplete},
 		// Cohere style
 		{provider.PathCohereV1Rerank, provider.ApiNameCohereV1Rerank},
+		// Qwen style
+		{provider.PathQwenV1Reranks, provider.ApiNameQwenV1Rerank},
+		{provider.PathQwenV1Conversations, provider.ApiNameQwenV1Conversations},
 	}
 	pathPatternToApiName = []pair[*regexp.Regexp, provider.ApiName]{
 		// OpenAI style
@@ -104,7 +116,6 @@ func init() {
 		wrapper.ProcessResponseHeaders(onHttpResponseHeaders),
 		wrapper.ProcessStreamingResponseBody(onStreamingResponseBody),
 		wrapper.ProcessResponseBody(onHttpResponseBody),
-		wrapper.WithRebuildAfterRequests[config.PluginConfig](1000),
 		wrapper.WithRebuildMaxMemBytes[config.PluginConfig](200*1024*1024),
 	)
 }
@@ -132,11 +143,11 @@ func parseOverrideRuleConfig(json gjson.Result, global config.PluginConfig, plug
 
 	pluginConfig.FromJson(json)
 	if err := pluginConfig.Validate(); err != nil {
-		log.Errorf("overriden rule config is invalid: %v", err)
+		log.Errorf("overridden rule config is invalid: %v", err)
 		return err
 	}
 	if err := pluginConfig.Complete(); err != nil {
-		log.Errorf("failed to apply overriden rule config: %v", err)
+		log.Errorf("failed to apply overridden rule config: %v", err)
 		return err
 	}
 
@@ -151,10 +162,38 @@ func initContext(ctx wrapper.HttpContext) {
 	for _, originHeader := range headerToOriginalHeaderMapping {
 		_ = proxywasm.RemoveHttpRequestHeader(originHeader)
 	}
-	originalAuth, _ := proxywasm.GetHttpRequestHeader(util.HeaderOriginalAuth)
-	if originalAuth == "" {
+
+	// Distinguish "first hop into this gateway" from "internal_redirect re-entry".
+	//
+	// Signal: x-higress-fallback-from. It is set by Envoy custom_response's
+	// RedirectPolicy on every internal_redirect within this gateway, and it
+	// survives mutateRequestHeaders on the redirected stream (it is NOT in
+	// Envoy's hardcoded strip list).
+	//
+	// Absence  => first hop. Distrust any incoming X-HI-ORIGINAL-AUTH — it may
+	//             have been set by a client or by an upstream cascaded gateway
+	//             running its own ai-proxy. Re-anchor the saved value from the
+	//             request's current Authorization, which is what this gateway
+	//             should treat as the "original" credential for later
+	//             internal_redirect hops.
+	// Presence => internal_redirect re-entry within this gateway. Leave
+	//             X-HI-ORIGINAL-AUTH alone — it preserves the value this gateway's
+	//             ai-proxy wrote on the previous pass, which key-auth needs for
+	//             re-authentication after Authorization has been replaced with
+	//             the upstream apiToken.
+	//
+	// SAFETY DEPENDENCY: this signal is reliable only when external callers
+	// cannot supply x-higress-fallback-from. For cascaded deployments where an
+	// upstream gateway may itself be in an internal_redirect chain when forwarding
+	// to this gateway, list x-higress-fallback-from (and x-hi-original-auth) in
+	// the HCM internal_only_headers as defense-in-depth.
+	fallbackFrom, _ := proxywasm.GetHttpRequestHeader(util.HeaderHigressFallbackFrom)
+	if fallbackFrom == "" {
+		_ = proxywasm.RemoveHttpRequestHeader(util.HeaderOriginalAuth)
 		value, _ := proxywasm.GetHttpRequestHeader(util.HeaderAuthorization)
-		ctx.SetContext(ctxOriginalAuth, value)
+		if value != "" {
+			ctx.SetContext(ctxOriginalAuth, value)
+		}
 	}
 }
 
@@ -245,6 +284,19 @@ func onHttpRequestHeader(ctx wrapper.HttpContext, pluginConfig config.PluginConf
 	// allowing plugins to inspect or modify the response correctly
 	_ = proxywasm.RemoveHttpRequestHeader("Accept-Encoding")
 
+	_, hasRequestBodyHandler := activeProvider.(provider.RequestBodyHandler)
+	hasRequestBody := ctx.HasRequestBody()
+	if hasRequestBody && hasRequestBodyHandler && requestContentLengthExceedsLimit(defaultMaxBodyBytes) {
+		_ = proxywasm.SendHttpResponseWithDetail(
+			http.StatusRequestEntityTooLarge,
+			"request_payload_too_large",
+			util.CreateHeaders(util.HeaderContentType, util.MimeTypeTextPlain),
+			[]byte("request payload too large"),
+			-1,
+		)
+		return types.ActionPause
+	}
+
 	if handler, ok := activeProvider.(provider.RequestHeadersHandler); ok {
 		// Set the apiToken for the current request.
 		providerConfig.SetApiTokenInUse(ctx)
@@ -261,9 +313,8 @@ func onHttpRequestHeader(ctx wrapper.HttpContext, pluginConfig config.PluginConf
 			return types.ActionContinue
 		}
 
-		hasRequestBody := ctx.HasRequestBody()
-		if hasRequestBody {
-			_ = proxywasm.RemoveHttpRequestHeader("Content-Length")
+		if hasRequestBody && hasRequestBodyHandler {
+			_ = proxywasm.RemoveHttpRequestHeader(headerContentLength)
 			ctx.SetRequestBodyBufferLimit(defaultMaxBodyBytes)
 			// Delay the header processing to allow changing in OnRequestBody
 			return types.HeaderStopIteration
@@ -275,6 +326,40 @@ func onHttpRequestHeader(ctx wrapper.HttpContext, pluginConfig config.PluginConf
 	return types.ActionContinue
 }
 
+func requestContentLengthExceedsLimit(limit uint32) bool {
+	contentLength, _ := proxywasm.GetHttpRequestHeader(headerContentLength)
+	if contentLengthExceedsLimit(contentLength, limit) {
+		return true
+	}
+
+	headers, err := proxywasm.GetHttpRequestHeaders()
+	if err != nil {
+		return false
+	}
+	for _, header := range headers {
+		if strings.EqualFold(header[0], headerContentLength) {
+			return contentLengthExceedsLimit(header[1], limit)
+		}
+	}
+	return false
+}
+
+func contentLengthExceedsLimit(contentLength string, limit uint32) bool {
+	contentLength = strings.TrimSpace(contentLength)
+	if contentLength == "" {
+		return false
+	}
+
+	length, err := strconv.ParseUint(contentLength, 10, 64)
+	if err != nil {
+		if numErr, ok := err.(*strconv.NumError); ok && numErr.Err == strconv.ErrRange {
+			return true
+		}
+		return false
+	}
+	return length > uint64(limit)
+}
+
 func onHttpRequestBody(ctx wrapper.HttpContext, pluginConfig config.PluginConfig, body []byte) types.Action {
 	activeProvider := pluginConfig.GetProvider()
 
@@ -283,6 +368,28 @@ func onHttpRequestBody(ctx wrapper.HttpContext, pluginConfig config.PluginConfig
 		return types.ActionContinue
 	}
 	log.Debugf("[onHttpRequestBody] provider=%s", activeProvider.GetProviderType())
+
+	// Reject a body declaring "model" more than once before any provider logic
+	// runs. gjson reads the first occurrence while the sjson rewrite below and
+	// upstream parsers settle on the last one, so model mapping, routing and
+	// credential selection would otherwise act on a different model than the
+	// upstream does. Once this passes, first and last occurrence are the same
+	// member, which makes the sjson rewrite in defaultTransformRequestBody
+	// unambiguous.
+	if duplicate, err := jsonbody.DuplicateTopLevelMember(body, "model"); err != nil {
+		log.Debugf("[onHttpRequestBody] skip duplicate model member check: %v", err)
+	} else if duplicate {
+		message := jsonbody.DuplicateMemberMessage("model")
+		log.Warnf("[onHttpRequestBody] %s", message)
+		_ = proxywasm.SendHttpResponseWithDetail(
+			http.StatusBadRequest,
+			"duplicate_model_member",
+			util.CreateHeaders(util.HeaderContentType, util.MimeTypeTextPlain),
+			[]byte(message),
+			-1,
+		)
+		return types.ActionPause
+	}
 
 	defer func() {
 		saveContextsToHeaders(ctx)
@@ -302,7 +409,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, pluginConfig config.PluginConfig
 		// 仅 /v1/chat/completions 和 /v1/completions 接口支持 stream_options 参数
 		// generic provider 不做能力映射，不添加 stream_options
 		if providerConfig.IsOpenAIProtocol() && !providerConfig.IsGeneric() && (apiName == provider.ApiNameChatCompletion || apiName == provider.ApiNameCompletion) {
-			newBody = normalizeOpenAiRequestBody(newBody)
+			newBody = normalizeOpenAiRequestBody(newBody, providerConfig.IsStreamUsageStatsDisabled())
 		}
 		log.Debugf("[onHttpRequestBody] newBody=%s", newBody)
 		body = newBody
@@ -342,8 +449,17 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, pluginConfig config.PluginCo
 		if err != nil {
 			log.Errorf("unable to load :status header from response: %v", err)
 		}
+		action := providerConfig.OnRequestFailed(activeProvider, ctx, apiTokenInUse, apiTokens, status)
+		if action == types.ActionContinue &&
+			providerConfig.GetLogUpstreamErrorResponseBody() &&
+			shouldLogUpstreamErrorResponse(status) {
+			ctx.SetContext(ctxUpstreamErrorResponseStatus, status)
+			ctx.BufferResponseBody()
+			ctx.SetResponseBodyBufferLimit(errorResponseBodyBufferLimit)
+			return action
+		}
 		ctx.DontReadResponseBody()
-		return providerConfig.OnRequestFailed(activeProvider, ctx, apiTokenInUse, apiTokens, status)
+		return action
 	}
 
 	// Reset ctxApiTokenRequestFailureCount if the request is successful,
@@ -399,7 +515,7 @@ func onStreamingResponseBody(ctx wrapper.HttpContext, pluginConfig config.Plugin
 				modifiedChunk = promoteThinkingInStreamingChunk(ctx, modifiedChunk, isLastChunk)
 			}
 			// Convert to Claude format if needed
-			claudeChunk, convertErr := convertStreamingResponseToClaude(ctx, modifiedChunk)
+			claudeChunk, convertErr := convertStreamingResponseToClaude(ctx, modifiedChunk, isLastChunk)
 			if convertErr != nil {
 				return modifiedChunk
 			}
@@ -446,7 +562,7 @@ func onStreamingResponseBody(ctx wrapper.HttpContext, pluginConfig config.Plugin
 		}
 
 		// Convert to Claude format if needed
-		claudeChunk, convertErr := convertStreamingResponseToClaude(ctx, result)
+		claudeChunk, convertErr := convertStreamingResponseToClaude(ctx, result, isLastChunk)
 		if convertErr != nil {
 			return result
 		}
@@ -480,7 +596,7 @@ func onStreamingResponseBody(ctx wrapper.HttpContext, pluginConfig config.Plugin
 	}
 
 	// Convert to Claude format if needed
-	claudeChunk, convertErr := convertStreamingResponseToClaude(ctx, result)
+	claudeChunk, convertErr := convertStreamingResponseToClaude(ctx, result, isLastChunk)
 	if convertErr != nil {
 		return result
 	}
@@ -496,6 +612,11 @@ func onHttpResponseBody(ctx wrapper.HttpContext, pluginConfig config.PluginConfi
 	}
 
 	log.Debugf("[onHttpResponseBody] provider=%s", activeProvider.GetProviderType())
+
+	if status := ctx.GetStringContext(ctxUpstreamErrorResponseStatus, ""); status != "" {
+		logUpstreamErrorResponse(ctx, activeProvider, status, body)
+		return types.ActionContinue
+	}
 
 	var finalBody []byte
 
@@ -534,6 +655,52 @@ func onHttpResponseBody(ctx wrapper.HttpContext, pluginConfig config.PluginConfi
 	return types.ActionContinue
 }
 
+func shouldLogUpstreamErrorResponse(status string) bool {
+	code, err := strconv.Atoi(status)
+	if err != nil {
+		return false
+	}
+	return code >= 400
+}
+
+func logUpstreamErrorResponse(ctx wrapper.HttpContext, activeProvider provider.Provider, status string, body []byte) {
+	apiName, _ := ctx.GetContext(provider.CtxKeyApiName).(provider.ApiName)
+	requestID := responseHeaderValue("x-request-id")
+	if requestID == "" {
+		requestID = responseHeaderValue("X-Request-Id")
+	}
+	bodyText, truncated := errorResponseBodyForLog(body)
+	log.Warnf("[upstream_error_response] provider=%s apiName=%s status=%s request_id=%s original_model=%s final_model=%s body_truncated=%v body=%s",
+		activeProvider.GetProviderType(),
+		apiName,
+		status,
+		requestID,
+		ctx.GetStringContext("originalRequestModel", ""),
+		ctx.GetStringContext("finalRequestModel", ""),
+		truncated,
+		bodyText,
+	)
+}
+
+func responseHeaderValue(name string) string {
+	value, err := proxywasm.GetHttpResponseHeader(name)
+	if err != nil {
+		return ""
+	}
+	return value
+}
+
+func errorResponseBodyForLog(body []byte) (string, bool) {
+	truncated := len(body) > maxLoggedErrorResponseBodyBytes
+	if truncated {
+		body = body[:maxLoggedErrorResponseBodyBytes]
+	}
+	text := strings.ToValidUTF8(string(body), "?")
+	text = strings.ReplaceAll(text, "\r", "\\r")
+	text = strings.ReplaceAll(text, "\n", "\\n")
+	return text, truncated
+}
+
 // Helper function to check if Claude response conversion is needed
 func needsClaudeResponseConversion(ctx wrapper.HttpContext) bool {
 	needClaudeConversion, _ := ctx.GetContext("needClaudeResponseConversion").(bool)
@@ -541,7 +708,7 @@ func needsClaudeResponseConversion(ctx wrapper.HttpContext) bool {
 }
 
 // Helper function to convert OpenAI streaming response to Claude format
-func convertStreamingResponseToClaude(ctx wrapper.HttpContext, data []byte) ([]byte, error) {
+func convertStreamingResponseToClaude(ctx wrapper.HttpContext, data []byte, isLastChunk bool) ([]byte, error) {
 	if !needsClaudeResponseConversion(ctx) {
 		return data, nil
 	}
@@ -561,7 +728,7 @@ func convertStreamingResponseToClaude(ctx wrapper.HttpContext, data []byte) ([]b
 		ctx.SetContext(claudeConverterKey, converter)
 	}
 
-	claudeChunk, err := converter.ConvertOpenAIStreamResponseToClaude(ctx, data)
+	claudeChunk, err := converter.ConvertOpenAIStreamResponseToClaude(ctx, data, isLastChunk)
 	if err != nil {
 		log.Errorf("failed to convert streaming response to claude format: %v", err)
 		return data, err
@@ -626,7 +793,10 @@ func convertResponseBodyToClaude(ctx wrapper.HttpContext, body []byte) ([]byte, 
 	return convertedBody, nil
 }
 
-func normalizeOpenAiRequestBody(body []byte) []byte {
+func normalizeOpenAiRequestBody(body []byte, disableStreamUsageStats bool) []byte {
+	if disableStreamUsageStats {
+		return body
+	}
 	var err error
 	// Default setting include_usage.
 	if gjson.GetBytes(body, "stream").Bool() && (!gjson.GetBytes(body, "stream_options").Exists() || !gjson.GetBytes(body, "stream_options.include_usage").Exists()) {

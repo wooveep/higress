@@ -23,11 +23,11 @@
 
 ## 报告安全问题
 
-安全问题总是得到认真对待。作为我们通常的原则，我们不鼓励任何人传播安全问题。如果您发现Higress的安全问题，请不要公开讨论，甚至不要公开问题。相反，我们鼓励您向 [higress@googlegroups.com](mailto:higress@googlegroups.com) 发送私人电子邮件 以报告此情况。
+安全问题总是得到认真对待。作为我们通常的原则，我们不鼓励任何人传播安全问题。如果您发现 Higress 的安全问题，请不要公开讨论，甚至不要公开 issue。请按照 [`SECURITY.md`](./SECURITY.md) 中描述的流程私密报告漏洞。
 
 ## 报告一般问题
 
-老实说，我们把每一个 Higress 用户都视为非常善良的贡献者。在体验了 Higress 之后，您可能会对项目有一些反馈。然后随时通过 [NEW ISSUE](https://github.com/alibaba/higress/issues/new/choose)打开一个问题。
+老实说，我们把每一个 Higress 用户都视为非常善良的贡献者。在体验了 Higress 之后，您可能会对项目有一些反馈。然后随时通过 [NEW ISSUE](https://github.com/higress-group/higress/issues/new/choose)打开一个问题。
 
 因为我们在一个分布式的方式合作项目Higress，我们欣赏写得很好的，详细的，准确的问题报告。为了让沟通更高效，我们希望每个人都可以搜索您的问题是否在搜索列表中。如果您发现它存在，请在现有问题下的评论中添加您的详细信息，而不是打开一个全新的问题。
 
@@ -79,15 +79,15 @@
 
 为了提出 PR，我们假设你已经注册了一个 GitHub ID。然后您可以通过以下步骤完成准备工作：
 
-1. **FORK** Higress 到您的存储库。要完成这项工作，您只需单击 [alibaba/higress](https://github.com/alibaba/higress) 主页右侧的 Fork 按钮。然后你将在 
+1. **FORK** Higress 到您的存储库。要完成这项工作，您只需单击 [higress-group/higress](https://github.com/higress-group/higress) 主页右侧的 Fork 按钮。然后你将在 
    中得到你的存储库`https://github.com/<your-username>/higress`，其中your-username是你的 GitHub 用户名。
 
 2. **克隆** 您自己的存储库以在本地开发. 用于 `git clone git@github.com:<your-username>/higress.git` 将存储库克隆到本地计算机。 然后您可以创建新分支来完成您希望进行的更改。
 
-3. **设置远程** 将上游设置为 `git@github.com:alibaba/higress.git` 使用以下两个命令：
+3. **设置远程** 将上游设置为 `git@github.com:higress-group/higress.git` 使用以下两个命令：
 
 ```bash
-git remote add upstream git@github.com:alibaba/higress.git
+git remote add upstream git@github.com:higress-group/higress.git
 git remote set-url --push upstream no-pushing
 ```
 
@@ -97,7 +97,7 @@ git remote set-url --push upstream no-pushing
 $ git remote -v
 origin     git@github.com:<your-username>/higress.git (fetch)
 origin     git@github.com:<your-username>/higress.git (push)
-upstream   git@github.com:alibaba/higress.git (fetch)
+upstream   git@github.com:higress-group/higress.git (fetch)
 upstream   no-pushing (push)
 ```
 
@@ -105,7 +105,7 @@ upstream   no-pushing (push)
 
 ### 分支定义
 
-现在我们假设通过拉取请求的每个贡献都是针对 Higress 中的 [主分支](https://github.com/alibaba/higress/tree/main) 。在贡献之前，请注意分支定义会很有帮助。
+现在我们假设通过拉取请求的每个贡献都是针对 Higress 中的 [主分支](https://github.com/higress-group/higress/tree/main) 。在贡献之前，请注意分支定义会很有帮助。
 
 作为贡献者，请再次记住，通过拉取请求的每个贡献都是针对主分支的。而在Higress项目中，还有其他几个分支，我们一般称它们为release分支（如0.6.0、0.6.1）、feature分支、hotfix分支。
 
@@ -142,7 +142,7 @@ upstream   no-pushing (push)
 * ~~更新~~
 * ~~添加文档~~
 
-如果你不知道该怎么做，请参阅 [如何编写 Git 提交消息](http://chris.beams.io/posts/git-commit/) 作为开始。
+如果你不知道该怎么做，请参阅 [如何编写 Git 提交消息](https://chris.beams.io/posts/git-commit/) 作为开始。
 
 #### 提交内容
 
@@ -169,30 +169,18 @@ git config --get user.email
 
 PR 是更改 Higress 项目文件的唯一方法。为了帮助审查人更好地理解你的目的，PR 描述不能太详细。我们鼓励贡献者遵循 [PR 模板](./.github/PULL_REQUEST_TEMPLATE.md) 来完成拉取请求。
 
-#### 使用 AI Coding 工具的特殊要求
+#### AI/编程代理实质性参与贡献的强制门禁
 
-如果你使用 AI Coding 工具（如 Cursor、GitHub Copilot 等）来生成 PR，我们有以下**严格要求**：
+如果 AI 或编程代理实质性参与分析、设计、实现、测试或 PR 准备，该贡献在开始实现前**必须**进入 Higress issue-spec 工作流。Proposal Issue 和 Design Issue 必须先获得 Higress 维护者批准。实现必须遵循已批准的 Design 及其授权的实现 TASK。Design 必须在开始验证前包含具体的 Verification Plan；在请求维护者接受验证或进行审查前，相应的验证 TASK 必须完成并附有证据。
 
-**针对新增独立插件的场景**（例如新实现的 wasm 插件或 golang-filter 插件）：
-- 你**必须**在插件目录下创建 `design/` 目录
-- 将你提供给 AI Coding 工具的设计文档放在 `design/` 目录中
-- 在 PR 描述中提供 AI Coding 工具生成的工作总结
+“实质性参与”包括：进行实质性的分析或设计；选择实现或验证方案；生成或实质性改写代码、测试、文档或配置；解释测试结果；或准备实质性的 PR 内容。由作者独立指导并验证的机械式自动补全不一定构成实质性参与。唯一例外是代理仅用于拼写、标点、空白或格式修正，且没有实质性选择或行为影响；作者必须在 PR 中声明并说明该例外。纯人工完成的 PR 不受此规则影响。
 
-**针对日常更新/修改的场景**：
-- 在 PR 描述中提供你给 AI Coding 工具的提示词/指令
-- 在 PR 描述中提供 AI Coding 工具生成的工作总结
+`higress-group/higress` 的维护者或管理员可选择绕过规划门禁，但必须先通过已认证的 `gh` 验证当前登录身份，以及该身份在规范仓库中的 `role_name` 为 `maintain` 或 `admin`。PR 必须选择“已验证的维护者/管理员例外”，确认 PR 作者与该登录身份一致，记录当前 PR 编号或 URL、登录名、返回的 `role_name` 和 PR 作者（绝不能记录 token），并明确证明每个校验命令均已取消设置 `GH_TOKEN` 和 `GITHUB_TOKEN`，然后说明绕过理由。任何失败、缺失或不匹配的校验都会使该例外失效；接受例外或合并 PR 的维护者必须在取消设置 token 覆盖的情况下独立核验当前实时证据。该例外不豁免 AI 披露、审查、合并要求，也不豁免 Bug 修复的运行时验证。
 
-**AI Coding 工作总结应包括**：
-- 做出的关键决策
-- 实现的主要更改
-- 重要的注意事项或限制
+任何使用 AI 或编程代理的 PR 都必须披露提示词/指令，并提供包含关键决策、主要更改及重要限制的 AI 辅助工作总结。对于受此门禁约束的贡献，经维护者批准的 issue-spec Design Issue 是权威设计载体；门禁不要求插件本地的 `design/` 文档。未满足门禁的实质性代理辅助 PR 将被安排为**较低审查优先级**，并且**不保证**维护者会及时审查。
 
-**Review 优先级说明**：
-- 如果你使用了 AI Coding 工具但没有按照上述要求操作，你的 PR review 优先级将会**降低**
-- 我们**无法保证**对不符合要求的 AI Coding PR 进行及时 review
-- 如果不是使用 AI Coding 工具完成的 PR，则不需要遵循这些额外要求
-
-这些要求的目的是确保使用 AI 生成的代码具有充分的文档记录和可追溯性，便于代码审查和后续维护。通过要求提供提示词/设计文档，我们可以更好地理解开发意图和上下文。
+定义、当前 issue-spec 命令、执行边界及运行时验证要求以
+[代理辅助贡献规范](./docs/developers/agent-assisted-contributions.md)为准。
 
 ### 开发前准备
 
@@ -204,10 +192,19 @@ make prebuild && go mod tidy
 
 任何测试用例都会受到欢迎。目前，Higress 功能测试用例是高优先级的。
 
-* 对于单元测试，您需要在同一模块的 test 目录中创建一个名为 xxxTest.go 的测试文件。
+### 新功能的测试要求
 
-* 对于集成测试，您可以将集成测试放在 test 目录。
-//TBD
+- **新 Wasm 插件**：必须包含单元测试，代码覆盖率不低于 30%（CI 强制检查）。
+- **新核心功能**：应包含单元测试，适用时还应添加 E2E 一致性测试用例。
+- **Bug 修复**：必须包含回归测试，并使用相同的固定输入和配置提供受影响/修复前版本的基线复现证据及修复后版本的确认结果。如果修复声明涉及运行时行为，单元测试不能替代相应的运行时证据；详见
+  [运行时验证规范](./docs/developers/agent-assisted-contributions.md#runtime-verification-for-bug-fixes)。
+- **Patch 覆盖率**：新增或修改的代码必须达到 50% 的覆盖率（由 Codecov 通过 `codecov.yml` 强制检查）。
+
+### 如何编写测试
+
+* 对于单元测试，在同一模块的 test 目录中创建一个名为 `xxxTest.go` 的测试文件。
+* 对于集成测试，将集成测试放在 test 目录。
+* 对于 Wasm 插件 E2E 测试，在 `test/e2e/conformance/tests/` 中添加测试用例。详见 [test/README.md](./test/README.md)。
 
 ## 参与帮助任何事情
 

@@ -51,6 +51,12 @@ type AuthorizationRequest struct {
 	HeadersToAdd        map[string]string
 	WithRequestBody     bool
 	MaxRequestBodyBytes uint32
+	AllowedProperties   []AllowedProperty
+}
+
+type AllowedProperty struct {
+	Path   []string
+	Header string
 }
 
 type AuthorizationResponse struct {
@@ -210,6 +216,13 @@ func parseAuthorizationRequestConfig(json gjson.Result, httpService *HttpService
 		}
 		authorizationRequest.MaxRequestBodyBytes = maxRequestBodyBytes
 
+		allowedProperties := authorizationRequestConfig.Get("allowed_properties").Array()
+		var err error
+		authorizationRequest.AllowedProperties, err = parseAllowedProperties(allowedProperties)
+		if err != nil {
+			return err
+		}
+
 		httpService.AuthorizationRequest = authorizationRequest
 	}
 	return nil
@@ -281,10 +294,17 @@ func parseMatchRules(json gjson.Result, config *ExtAuthConfig) error {
 			}
 		}
 
+		headerConditions, parseErr := parseHeaderConditions(value.Get("match_rule_headers"), int(key.Int()))
+		if parseErr != nil {
+			err = parseErr
+			return false // stop iterating
+		}
+
 		ruleList = append(ruleList, expr.Rule{
-			Domain: domain,
-			Method: convertToStringList(methodArray),
-			Path:   pathMatcher,
+			Domain:  domain,
+			Method:  convertToStringList(methodArray),
+			Path:    pathMatcher,
+			Headers: headerConditions,
 		})
 		return true // keep iterating
 	})
@@ -298,6 +318,68 @@ func parseMatchRules(json gjson.Result, config *ExtAuthConfig) error {
 		RuleList: ruleList,
 	}
 	return nil
+}
+
+func parseHeaderConditions(result gjson.Result, ruleIndex int) ([]expr.HeaderCondition, error) {
+	if !result.Exists() {
+		return nil, nil
+	}
+
+	fieldPath := fmt.Sprintf("match_list[%d].match_rule_headers", ruleIndex)
+	if !result.IsArray() {
+		return nil, fmt.Errorf("%s must be a non-empty array", fieldPath)
+	}
+	items := result.Array()
+	if len(items) == 0 {
+		return nil, fmt.Errorf("%s must be a non-empty array", fieldPath)
+	}
+
+	conditions := make([]expr.HeaderCondition, 0, len(items))
+	seenNames := make(map[string]struct{}, len(items))
+	for index, item := range items {
+		itemPath := fmt.Sprintf("%s[%d]", fieldPath, index)
+		nameResult := item.Get("name")
+		if !nameResult.Exists() {
+			return nil, fmt.Errorf("%s: missing required field 'name'", itemPath)
+		}
+		name := nameResult.String()
+		if nameResult.Type != gjson.String || !isValidHTTPHeaderName(name) {
+			return nil, fmt.Errorf("%s.name must be a valid non-pseudo HTTP header name", itemPath)
+		}
+		name = strings.ToLower(name)
+		if _, duplicate := seenNames[name]; duplicate {
+			return nil, fmt.Errorf("%s contains duplicate header name %q", fieldPath, name)
+		}
+
+		existsResult := item.Get("exists")
+		if !existsResult.Exists() {
+			return nil, fmt.Errorf("%s: missing required field 'exists'", itemPath)
+		}
+		if existsResult.Type != gjson.True && existsResult.Type != gjson.False {
+			return nil, fmt.Errorf("%s.exists must be a boolean", itemPath)
+		}
+
+		seenNames[name] = struct{}{}
+		conditions = append(conditions, expr.HeaderCondition{Name: name, Exists: existsResult.Bool()})
+	}
+	return conditions, nil
+}
+
+func isValidHTTPHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, char := range []byte(name) {
+		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' {
+			continue
+		}
+		switch char {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func convertToStringMap(result gjson.Result) map[string]string {
@@ -315,4 +397,34 @@ func convertToStringList(results []gjson.Result) []string {
 		interfaces[i] = result.String()
 	}
 	return interfaces
+}
+
+func parseAllowedProperties(results []gjson.Result) ([]AllowedProperty, error) {
+	props := make([]AllowedProperty, 0, len(results))
+	for i, result := range results {
+		pathVal := result.Get("path")
+		headerVal := result.Get("header")
+		if !pathVal.Exists() {
+			return nil, fmt.Errorf("allowed_properties[%d]: missing required field 'path'", i)
+		}
+		if !headerVal.Exists() {
+			return nil, fmt.Errorf("allowed_properties[%d]: missing required field 'header'", i)
+		}
+		// path can be array format: [route_name] or [metadata, test]
+		// or single value format: route_name
+		var path []string
+		if pathVal.IsArray() {
+			pathVal.ForEach(func(key, value gjson.Result) bool {
+				path = append(path, value.String())
+				return true
+			})
+		} else {
+			path = []string{pathVal.String()}
+		}
+		props = append(props, AllowedProperty{
+			Path:   path,
+			Header: headerVal.String(),
+		})
+	}
+	return props, nil
 }

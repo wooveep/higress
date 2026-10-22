@@ -8,13 +8,13 @@ import (
 	"hash/fnv"
 	"math/rand"
 	"net/http"
-	"path"
 	"regexp"
 	"strconv"
 
 	"strings"
 
 	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-proxy/util"
+	"github.com/alibaba/higress/plugins/wasm-go/pkg/pathutil"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 	"github.com/higress-group/wasm-go/pkg/log"
@@ -65,15 +65,19 @@ const (
 	ApiNameRetrieveVideo                        ApiName = "openai/v1/retrievevideo"
 	ApiNameVideoRemix                           ApiName = "openai/v1/videoremix"
 	ApiNameRetrieveVideoContent                 ApiName = "openai/v1/retrievevideocontent"
+	ApiNameKlingImageToVideo                    ApiName = "kling/v1/image2video"
+	ApiNameKlingRetrieveImageVideo              ApiName = "kling/v1/retrieveimagevideo"
 
 	// TODO: 以下是一些非标准的API名称，需要进一步确认是否支持
 	ApiNameCohereV1Rerank              ApiName = "cohere/v1/rerank"
 	ApiNameQwenAsyncAIGC               ApiName = "qwen/v1/services/aigc"
 	ApiNameQwenAsyncTask               ApiName = "qwen/v1/tasks"
 	ApiNameQwenV1Rerank                ApiName = "qwen/v1/rerank"
+	ApiNameQwenV1Conversations         ApiName = "qwen/v1/conversations"
 	ApiNameGeminiGenerateContent       ApiName = "gemini/v1beta/generatecontent"
 	ApiNameGeminiStreamGenerateContent ApiName = "gemini/v1beta/streamgeneratecontent"
 	ApiNameAnthropicMessages           ApiName = "anthropic/v1/messages"
+	ApiNameAnthropicCountTokens        ApiName = "anthropic/v1/messages/count_tokens"
 	ApiNameAnthropicComplete           ApiName = "anthropic/v1/complete"
 	ApiNameVertexRaw                   ApiName = "vertex/raw"
 
@@ -112,11 +116,16 @@ const (
 	PathOpenAIRetrieveVideoContent                 = "/v1/videos/{video_id}/content"
 
 	// Anthropic
-	PathAnthropicMessages = "/v1/messages"
-	PathAnthropicComplete = "/v1/complete"
+	PathAnthropicMessages            = "/v1/messages"
+	PathAnthropicMessagesCountTokens = "/v1/messages/count_tokens"
+	PathAnthropicComplete            = "/v1/complete"
 
 	// Cohere
 	PathCohereV1Rerank = "/v1/rerank"
+
+	// Qwen
+	PathQwenV1Reranks       = "/v1/reranks"
+	PathQwenV1Conversations = "/v1/conversations"
 
 	providerTypeMoonshot   = "moonshot"
 	providerTypeAzure      = "azure"
@@ -152,8 +161,10 @@ const (
 	providerTypeOpenRouter = "openrouter"
 	providerTypeLongcat    = "longcat"
 	providerTypeFireworks  = "fireworks"
+	providerTypeGaladriel  = "galadriel"
 	providerTypeVllm       = "vllm"
 	providerTypeGeneric    = "generic"
+	providerTypeKling      = "kling"
 
 	protocolOpenAI   = "openai"
 	protocolOriginal = "original"
@@ -182,6 +193,17 @@ const (
 	ctxKeyReasoningContentPushed = "reasoningContentPushed"
 	ctxKeyHasContentDelta        = "hasContentDelta"
 	ctxKeyBufferedReasoning      = "bufferedReasoning"
+
+	// SSE framing keys: one per call site so coexisting framers on the same
+	// request never alias each other's retained tail.
+	ctxKeyClaudeSSEFraming        = "sseFraming/claude"
+	ctxKeyGeminiSSEFraming        = "sseFraming/gemini"
+	ctxKeySparkSSEFraming         = "sseFraming/spark"
+	ctxKeyMinimaxSSEFraming       = "sseFraming/minimax"
+	ctxKeyTritonSSEFraming        = "sseFraming/triton"
+	ctxKeyDifySSEFraming          = "sseFraming/dify"
+	ctxKeyHunyuanSSEFraming       = "sseFraming/hunyuan"
+	ctxKeyClaudeConvertSSEFraming = "sseFraming/claudeConvert"
 
 	objectChatCompletion      = "chat.completion"
 	objectChatCompletionChunk = "chat.completion.chunk"
@@ -246,8 +268,10 @@ var (
 		providerTypeOpenRouter: &openrouterProviderInitializer{},
 		providerTypeLongcat:    &longcatProviderInitializer{},
 		providerTypeFireworks:  &fireworksProviderInitializer{},
+		providerTypeGaladriel:  &galadrielProviderInitializer{},
 		providerTypeVllm:       &vllmProviderInitializer{},
 		providerTypeGeneric:    &genericProviderInitializer{},
+		providerTypeKling:      &klingProviderInitializer{},
 	}
 )
 
@@ -306,7 +330,7 @@ type ProviderConfig struct {
 	typ string `required:"true" yaml:"type" json:"type"`
 	// @Title zh-CN API Tokens
 	// @Description zh-CN 在请求AI服务时用于认证的API Token列表。不同的AI服务提供商可能有不同的名称。部分供应商只支持配置一个API Token（如Azure OpenAI）。
-	apiTokens []string `required:"false" yaml:"apiToken" json:"apiTokens"`
+	apiTokens []string `required:"false" yaml:"apiTokens" json:"apiTokens"`
 	// @Title zh-CN 请求超时
 	// @Description zh-CN 请求AI服务的超时时间，单位为毫秒。默认值为120000，即2分钟。此项配置目前仅用于获取上下文信息，并不影响实际转发大模型请求。
 	timeout uint32 `required:"false" yaml:"timeout" json:"timeout"`
@@ -316,6 +340,9 @@ type ProviderConfig struct {
 	// @Title zh-CN 失败请求重试
 	// @Description zh-CN 对失败的请求立即进行重试
 	retryOnFailure *retryOnFailure `required:"false" yaml:"retryOnFailure" json:"retryOnFailure"`
+	// @Title zh-CN 禁用流式使用统计
+	// @Description zh-CN 禁用后流式请求不会注入 stream_options.include_usage 字段。启用此选项后，流式请求的 token 使用统计将不可用，影响 ai-statistics/access-log 的 usage 字段。适用于不支持 stream_options 的旧版推理引擎（如 vLLM 0.4.3）。
+	disableStreamUsageStats bool `required:"false" yaml:"disableStreamUsageStats" json:"disableStreamUsageStats"`
 	// @Title zh-CN 推理内容处理方式
 	// @Description zh-CN 如何处理大模型服务返回的推理内容。目前支持以下取值：passthrough（正常输出推理内容）、ignore（不输出推理内容）、concat（将推理内容拼接在常规输出内容之前）。默认为 normal。仅支持通义千问服务。
 	reasoningContentMode string `required:"false" yaml:"reasoningContentMode" json:"reasoningContentMode"`
@@ -412,6 +439,15 @@ type ProviderConfig struct {
 	// @Title zh-CN Vertex token刷新提前时间
 	// @Description zh-CN 用于Google服务账号认证，access token过期时间判定提前刷新，单位为秒，默认值为60秒
 	vertexTokenRefreshAhead int64 `required:"false" yaml:"vertexTokenRefreshAhead" json:"vertexTokenRefreshAhead"`
+	// @Title zh-CN Kling Access Key
+	// @Description zh-CN 仅适用于KlingAI官方服务鉴权，用于生成JWT Token
+	klingAccessKey string `required:"false" yaml:"klingAccessKey" json:"klingAccessKey"`
+	// @Title zh-CN Kling Secret Key
+	// @Description zh-CN 仅适用于KlingAI官方服务鉴权，用于签名JWT Token
+	klingSecretKey string `required:"false" yaml:"klingSecretKey" json:"klingSecretKey"`
+	// @Title zh-CN Kling token刷新提前时间
+	// @Description zh-CN Kling JWT过期前提前刷新的时间，单位为秒，默认值为60秒
+	klingTokenRefreshAhead int64 `required:"false" yaml:"klingTokenRefreshAhead" json:"klingTokenRefreshAhead"`
 	// @Title zh-CN Vertex AI OpenAI兼容模式
 	// @Description zh-CN 启用后将使用Vertex AI的OpenAI兼容API，请求和响应均使用OpenAI格式，无需协议转换。与Express Mode(apiTokens)互斥。
 	vertexOpenAICompatible bool `required:"false" yaml:"vertexOpenAICompatible" json:"vertexOpenAICompatible"`
@@ -490,6 +526,9 @@ type ProviderConfig struct {
 	// @Title zh-CN 空内容时提升思考为正文
 	// @Description zh-CN 开启后，若模型响应只包含 reasoning_content/thinking 而没有正文内容，将 reasoning 内容提升为正文内容返回，避免客户端收到空回复。
 	promoteThinkingOnEmpty bool `required:"false" yaml:"promoteThinkingOnEmpty" json:"promoteThinkingOnEmpty"`
+	// @Title zh-CN 记录上游错误响应体
+	// @Description zh-CN 开启后，将上游 4xx/5xx 响应体以 warn 日志输出，便于排查 provider 兼容性问题。默认关闭，避免误记录敏感错误内容。
+	logUpstreamErrorResponseBody bool `required:"false" yaml:"logUpstreamErrorResponseBody" json:"logUpstreamErrorResponseBody"`
 	// @Title zh-CN HiClaw 模式
 	// @Description zh-CN 开启后同时启用 mergeConsecutiveMessages 和 promoteThinkingOnEmpty，适用于 HiClaw 多 Agent 协作场景。
 	hiclawMode bool `required:"false" yaml:"hiclawMode" json:"hiclawMode"`
@@ -504,6 +543,10 @@ func (c *ProviderConfig) GetId() string {
 
 func (c *ProviderConfig) GetType() string {
 	return c.typ
+}
+
+func (c *ProviderConfig) IsStreamUsageStatsDisabled() bool {
+	return c.disableStreamUsageStats
 }
 
 func (c *ProviderConfig) GetProtocol() string {
@@ -524,6 +567,18 @@ func (c *ProviderConfig) GetContextCleanupCommands() []string {
 
 func (c *ProviderConfig) IsOpenAIProtocol() bool {
 	return c.protocol == protocolOpenAI
+}
+
+func (c *ProviderConfig) supportsMessageReasoningContent() bool {
+	switch c.typ {
+	case providerTypeQwen, providerTypeOpenRouter, providerTypeZhipuAi:
+		return true
+	default:
+		// DeepSeek supports Anthropic Messages natively, so Claude requests usually bypass
+		// this Claude->OpenAI conversion path. Its OpenAI request-side reasoning history
+		// semantics should be validated separately before adding it here.
+		return false
+	}
 }
 
 func (c *ProviderConfig) FromJson(json gjson.Result) {
@@ -550,7 +605,7 @@ func (c *ProviderConfig) FromJson(json gjson.Result) {
 	if compatible := json.Get("qwenEnableCompatible"); compatible.Exists() {
 		c.qwenEnableCompatible = compatible.Bool()
 	} else {
-		// Default use official compatiable mode
+		// Default use official compatible mode
 		c.qwenEnableCompatible = true
 	}
 	c.qwenDomain = json.Get("qwenDomain").String()
@@ -615,6 +670,12 @@ func (c *ProviderConfig) FromJson(json gjson.Result) {
 	if c.vertexTokenRefreshAhead == 0 {
 		c.vertexTokenRefreshAhead = 60
 	}
+	c.klingAccessKey = json.Get("klingAccessKey").String()
+	c.klingSecretKey = json.Get("klingSecretKey").String()
+	c.klingTokenRefreshAhead = json.Get("klingTokenRefreshAhead").Int()
+	if c.klingTokenRefreshAhead == 0 {
+		c.klingTokenRefreshAhead = 60
+	}
 	c.vertexOpenAICompatible = json.Get("vertexOpenAICompatible").Bool()
 	c.targetLang = json.Get("targetLang").String()
 
@@ -671,6 +732,7 @@ func (c *ProviderConfig) FromJson(json gjson.Result) {
 	if retryOnFailureJson.Exists() {
 		c.retryOnFailure.FromJson(retryOnFailureJson)
 	}
+	c.disableStreamUsageStats = json.Get("disableStreamUsageStats").Bool()
 	c.difyApiUrl = json.Get("difyApiUrl").String()
 	c.botType = json.Get("botType").String()
 	c.inputVariable = json.Get("inputVariable").String()
@@ -697,6 +759,8 @@ func (c *ProviderConfig) FromJson(json gjson.Result) {
 			string(ApiNameCohereV1Rerank),
 			string(ApiNameVideos),
 			string(ApiNameRetrieveVideo),
+			string(ApiNameKlingImageToVideo),
+			string(ApiNameKlingRetrieveImageVideo),
 			string(ApiNameRetrieveVideoContent),
 			string(ApiNameVideoRemix):
 			c.capabilities[capability] = pathJson.String()
@@ -728,6 +792,7 @@ func (c *ProviderConfig) FromJson(json gjson.Result) {
 		c.providerDomain = json.Get("doubaoDomain").String()
 	}
 	c.promoteThinkingOnEmpty = json.Get("promoteThinkingOnEmpty").Bool()
+	c.logUpstreamErrorResponseBody = json.Get("logUpstreamErrorResponseBody").Bool()
 	c.hiclawMode = json.Get("hiclawMode").Bool()
 	if c.hiclawMode {
 		c.mergeConsecutiveMessages = true
@@ -885,6 +950,10 @@ func (c *ProviderConfig) GetPromoteThinkingOnEmpty() bool {
 	return c.promoteThinkingOnEmpty
 }
 
+func (c *ProviderConfig) GetLogUpstreamErrorResponseBody() bool {
+	return c.logUpstreamErrorResponseBody
+}
+
 func (c *ProviderConfig) ReplaceByCustomSettings(body []byte) ([]byte, error) {
 	return ReplaceByCustomSettings(body, c.customSettings)
 }
@@ -903,6 +972,24 @@ func (c *ProviderConfig) applyProviderBasePath(path string) string {
 		return c.providerBasePath + path
 	}
 	return path
+}
+
+// prependBasePath puts c.basePath in front of the request path. The request path
+// carries the query string, so joining it whole would let dot segments hidden in
+// a query value resolve as path segments and escape basePath; pathutil.SafeJoin
+// joins the path portion only and rejects results outside basePath.
+//
+// The already-prefixed branch is validated as well: a path that starts with
+// basePath can still climb back out of it, and returning it untouched would skip
+// every check.
+func (c *ProviderConfig) prependBasePath(currentPath string) (string, error) {
+	if strings.HasPrefix(currentPath, c.basePath) {
+		if err := pathutil.ValidateWithin(c.basePath, currentPath); err != nil {
+			return "", err
+		}
+		return currentPath, nil
+	}
+	return pathutil.SafeJoin(c.basePath, currentPath)
 }
 
 func (c *ProviderConfig) parseRequestAndMapModel(ctx wrapper.HttpContext, request interface{}, body []byte) error {
@@ -997,7 +1084,7 @@ func doGetMappedModel(model string, modelMapping map[string]string) string {
 	}
 
 	if v, ok := modelMapping[model]; ok {
-		log.Debugf("model [%s] is mapped to [%s] explictly", model, v)
+		log.Debugf("model [%s] is mapped to [%s] explicitly", model, v)
 		return v
 	}
 
@@ -1140,7 +1227,10 @@ func ExtractStreamingEvents(ctx wrapper.HttpContext, chunk []byte) []StreamEvent
 
 func (c *ProviderConfig) isSupportedAPI(apiName ApiName) bool {
 	_, exist := c.capabilities[string(apiName)]
-	return exist
+	if exist {
+		return true
+	}
+	return c.typ == providerTypeBedrock && apiName == ApiNameAnthropicMessages
 }
 
 func (c *ProviderConfig) IsSupportedAPI(apiName ApiName) bool {
@@ -1152,7 +1242,9 @@ func (c *ProviderConfig) setDefaultCapabilities(capabilities map[string]string) 
 		c.capabilities = make(map[string]string)
 	}
 	for capability, path := range capabilities {
-		c.capabilities[capability] = path
+		if _, exists := c.capabilities[capability]; !exists {
+			c.capabilities[capability] = path
+		}
 	}
 }
 
@@ -1196,7 +1288,10 @@ func (c *ProviderConfig) handleRequestBody(
 
 		// Convert Claude protocol to OpenAI protocol
 		converter := &ClaudeToOpenAIConverter{}
-		body, err = converter.ConvertClaudeRequestToOpenAI(body)
+		body, err = converter.ConvertClaudeRequestToOpenAIWithOptions(body, ClaudeToOpenAIConvertOptions{
+			PreserveMessageReasoningContent: c.supportsMessageReasoningContent(),
+			DisableStreamUsageStats:          c.disableStreamUsageStats,
+		})
 		if err != nil {
 			return types.ActionContinue, fmt.Errorf("failed to convert claude request to openai: %v", err)
 		}
@@ -1236,6 +1331,10 @@ func (c *ProviderConfig) handleRequestBody(
 		}
 	}
 
+	if needClaudeConversion && provider.GetProviderType() != providerTypeBedrock && provider.GetProviderType() != providerTypeClaude {
+		body = stripClaudeInternalMessageFields(body, c.supportsMessageReasoningContent())
+	}
+
 	// use openai protocol (either original openai or converted from claude)
 	if handler, ok := provider.(TransformRequestBodyHandler); ok {
 		body, err = handler.TransformRequestBody(ctx, apiName, body)
@@ -1269,6 +1368,42 @@ func (c *ProviderConfig) handleRequestBody(
 	return types.ActionContinue, replaceRequestBody(body)
 }
 
+func stripClaudeInternalMessageFields(body []byte, preserveMessageReasoningContent ...bool) []byte {
+	result := body
+	for _, field := range []string{"claude_thinking", "claude_output_config", "claude_anthropic_beta"} {
+		if updated, err := sjson.DeleteBytes(result, field); err == nil {
+			result = updated
+		}
+	}
+
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.IsArray() {
+		return result
+	}
+
+	fields := []string{
+		"reasoning",
+		"reasoning_signature",
+		"reasoning_redacted_content",
+		"claude_content_blocks",
+		"claude_content_block_index",
+		"claude_content_block_stop",
+	}
+	if len(preserveMessageReasoningContent) == 0 || !preserveMessageReasoningContent[0] {
+		fields = append(fields, "reasoning_content")
+	}
+
+	for _, field := range fields {
+		messages.ForEach(func(key, _ gjson.Result) bool {
+			if updated, err := sjson.DeleteBytes(result, fmt.Sprintf("messages.%d.%s", key.Int(), field)); err == nil {
+				result = updated
+			}
+			return true
+		})
+	}
+	return result
+}
+
 func (c *ProviderConfig) handleRequestHeaders(provider Provider, ctx wrapper.HttpContext, apiName ApiName) {
 	headers := util.GetRequestHeaders()
 	originPath := headers.Get(":path")
@@ -1299,8 +1434,15 @@ func (c *ProviderConfig) handleRequestHeaders(provider Provider, ctx wrapper.Htt
 		headers.Set(":path", removePrefixPath)
 	}
 
-	if c.basePath != "" && c.basePathHandling == basePathHandlingPrepend && !strings.HasPrefix(headers.Get(":path"), c.basePath) {
-		headers.Set(":path", path.Join(c.basePath, headers.Get(":path")))
+	if c.basePath != "" && c.basePathHandling == basePathHandlingPrepend {
+		prependedPath, err := c.prependBasePath(headers.Get(":path"))
+		if err != nil {
+			log.Errorf("rejecting request path %q for basePath %q: %v", headers.Get(":path"), c.basePath, err)
+			_ = proxywasm.SendHttpResponseWithDetail(http.StatusBadRequest, "ai-proxy.path_traversal",
+				util.CreateHeaders(util.HeaderContentType, util.MimeTypeTextPlain), []byte("invalid request path"), -1)
+			return
+		}
+		headers.Set(":path", prependedPath)
 	}
 
 	// Apply providerBasePath if configured
@@ -1405,7 +1547,8 @@ func (c *ProviderConfig) needToProcessRequestBody(apiName ApiName) bool {
 		ApiNameResponses,
 		ApiNameGeminiGenerateContent,
 		ApiNameGeminiStreamGenerateContent,
-		ApiNameAnthropicMessages:
+		ApiNameAnthropicMessages,
+		ApiNameAnthropicCountTokens:
 		return true
 	}
 	return false

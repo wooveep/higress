@@ -2,7 +2,7 @@
 
 Higress のハッキングに興味がある場合は、温かく歓迎します。まず、このような意欲を非常に奨励します。そして、以下は貢献ガイドのリストです。
 
-[[中文](./CONTRIBUTING.md)] | [[English Contributing Document](./CONTRIBUTING_EN.md)]
+[[中文](./CONTRIBUTING_CN.md)] | [[English Contributing Document](./CONTRIBUTING_EN.md)]
 
 ## トピック
 
@@ -23,11 +23,11 @@ Higress のハッキングに興味がある場合は、温かく歓迎します
 
 ## セキュリティ問題の報告
 
-セキュリティ問題は常に真剣に扱われます。通常の原則として、セキュリティ問題を広めることは推奨しません。Higress のセキュリティ問題を発見した場合は、公開で議論せず、公開の問題を開かないでください。代わりに、[higress@googlegroups.com](mailto:higress@googlegroups.com) にプライベートなメールを送信して報告することをお勧めします。
+セキュリティ問題は常に真剣に扱われます。通常の原則として、セキュリティ問題を広めることは推奨しません。Higress のセキュリティ問題を発見した場合は、公開で議論せず、公開の issue を開かないでください。[`SECURITY.md`](./SECURITY.md) に記載されたプロセスに従って、脆弱性を非公開で報告してください。
 
 ## 一般的な問題の報告
 
-正直なところ、Higress のすべてのユーザーを非常に親切な貢献者と見なしています。Higress を体験した後、プロジェクトに対するフィードバックがあるかもしれません。その場合は、[NEW ISSUE](https://github.com/alibaba/higress/issues/new/choose) を通じて問題を開くことを自由に行ってください。
+正直なところ、Higress のすべてのユーザーを非常に親切な貢献者と見なしています。Higress を体験した後、プロジェクトに対するフィードバックがあるかもしれません。その場合は、[NEW ISSUE](https://github.com/higress-group/higress/issues/new/choose) を通じて問題を開くことを自由に行ってください。
 
 Higress プロジェクトを分散型で協力しているため、**よく書かれた**、**詳細な**、**明確な**問題報告を高く評価します。コミュニケーションをより効率的にするために、問題が検索リストに存在するかどうかを検索することを希望します。存在する場合は、新しい問題を開くのではなく、既存の問題のコメントに詳細を追加してください。
 
@@ -78,14 +78,14 @@ Higress を PR で改善する準備ができたら、ここで PR ルールを�
 
 PR を提出するために、GitHub ID に登録していることを前提とします。その後、以下の手順で準備を完了できます：
 
-1. Higress を自分のリポジトリに **FORK** します。この作業を行うには、[alibaba/higress](https://github.com/alibaba/higress) のメインページの右上にある Fork ボタンをクリックするだけです。その後、`https://github.com/<your-username>/higress` に自分のリポジトリが作成されます。ここで、`your-username` はあなたの GitHub ユーザー名です。
+1. Higress を自分のリポジトリに **FORK** します。この作業を行うには、[higress-group/higress](https://github.com/higress-group/higress) のメインページの右上にある Fork ボタンをクリックするだけです。その後、`https://github.com/<your-username>/higress` に自分のリポジトリが作成されます。ここで、`your-username` はあなたの GitHub ユーザー名です。
 
 2. 自分のリポジトリをローカルに **CLONE** します。`git clone git@github.com:<your-username>/higress.git` を使用してリポジトリをローカルマシンにクローンします。その後、新しいブランチを作成して、行いたい変更を完了できます。
 
-3. リモートを `git@github.com:alibaba/higress.git` に設定します。以下の2つのコマンドを使用します：
+3. リモートを `git@github.com:higress-group/higress.git` に設定します。以下の2つのコマンドを使用します：
 
 ```bash
-git remote add upstream git@github.com:alibaba/higress.git
+git remote add upstream git@github.com:higress-group/higress.git
 git remote set-url --push upstream no-pushing
 ```
 
@@ -95,7 +95,7 @@ git remote set-url --push upstream no-pushing
 $ git remote -v
 origin     git@github.com:<your-username>/higress.git (fetch)
 origin     git@github.com:<your-username>/higress.git (push)
-upstream   git@github.com:alibaba/higress.git (fetch)
+upstream   git@github.com:higress-group/higress.git (fetch)
 upstream   no-pushing (push)
 ```
 
@@ -103,7 +103,7 @@ upstream   no-pushing (push)
 
 ### ブランチの定義
 
-現在、プルリクエストを通じたすべての貢献は Higress の [main ブランチ](https://github.com/alibaba/higress/tree/main) に対するものであると仮定します。貢献する前に、ブランチの定義を理解することは非常に役立ちます。
+現在、プルリクエストを通じたすべての貢献は Higress の [main ブランチ](https://github.com/higress-group/higress/tree/main) に対するものであると仮定します。貢献する前に、ブランチの定義を理解することは非常に役立ちます。
 
 貢献者として、プルリクエストを通じたすべての貢献は main ブランチに対するものであることを再度覚えておいてください。Higress プロジェクトには、リリースブランチ（例：0.6.0、0.6.1）、機能ブランチ、ホットフィックスブランチなど、いくつかの他のブランチがあります。
 
@@ -139,7 +139,7 @@ upstream   no-pushing (push)
 * ~~更新~~
 * ~~ドキュメント追加~~
 
-迷った場合は、[Git コミットメッセージの書き方](http://chris.beams.io/posts/git-commit/) を参照してください。
+迷った場合は、[Git コミットメッセージの書き方](https://chris.beams.io/posts/git-commit/) を参照してください。
 
 #### コミット内容
 
@@ -164,30 +164,18 @@ git config --get user.email
 
 PR は Higress プロジェクトファイルを変更する唯一の方法です。レビュアーが目的をよりよく理解できるようにするために、PR 説明は詳細すぎることはありません。貢献者には、[PR テンプレート](./.github/PULL_REQUEST_TEMPLATE.md) に従ってプルリクエストを完了することを奨励します。
 
-#### AI Coding ツール使用時の特別な要件
+#### AI／コーディングエージェントが実質的に関与する貢献の必須ゲート
 
-AI Coding ツール（Cursor、GitHub Copilot など）を使用して PR を生成する場合、以下の**厳格な要件**があります：
+AI またはコーディングエージェントが分析、設計、実装、テスト、または PR の準備に実質的に関与する場合、その貢献は実装開始前に Higress の issue-spec ワークフローへ**必ず**入る必要があります。Proposal Issue と Design Issue は、先に Higress メンテナーの承認を得なければなりません。実装は、承認済み Design と、そこで許可された実装 TASK に従う必要があります。Design には検証開始前に具体的な Verification Plan を記載し、メンテナーに検証の受け入れまたはレビューを依頼する前に、対応する検証 TASK を証拠付きで完了しなければなりません。
 
-**新規独立プラグインのシナリオ**（新しく実装された wasm プラグインや golang-filter プラグインなど）の場合：
-- プラグインディレクトリの下に `design/` ディレクトリを作成する**必要があります**
-- AI Coding ツールに提供した設計ドキュメントを `design/` ディレクトリに配置してください
-- PR の説明に AI Coding サマリーを提供してください
+「実質的な関与」には、実質的な分析または設計、実装・検証方法の選択、コード・テスト・ドキュメント・設定の生成または実質的な変更、テスト結果の解釈、実質的な PR 内容の準備が含まれます。作者が独立して指示し検証する機械的な補完は、必ずしも実質的な関与ではありません。唯一の例外は、エージェントの利用が綴り、句読点、空白、または書式の修正だけに限定され、実質的な選択や動作への影響がない場合です。この例外は PR で申告し、理由を説明してください。人間だけで作成した PR には、この規則は適用されません。
 
-**通常の更新/変更のシナリオ**の場合：
-- PR の説明に AI Coding ツールに与えたプロンプト/指示を提供してください
-- PR の説明に AI Coding サマリーを提供してください
+`higress-group/higress` のメンテナーまたは管理者は、認証済みの `gh` で現在のログインと正規リポジトリに対する `role_name` が `maintain` または `admin` であることを検証した場合に限り、計画ゲートのバイパスを選択できます。PR では「検証済みメンテナー／管理者例外」を選択し、PR 作者がそのログインと一致することを確認して、現在の PR 番号または URL、ログイン名、返された `role_name`、PR 作者（トークンは決して記録しない）、すべての検証コマンドで `GH_TOKEN` と `GITHUB_TOKEN` が unset であったことの明示的な証明、およびバイパス理由を記録してください。失敗、欠落、または不一致の検証では例外を利用できず、例外を受け入れるか PR をマージするメンテナーは token override を unset にして現在のライブ証拠を独立して検証する必要があります。この例外は AI 開示、レビュー、マージの要件、またはバグ修正のランタイム検証を免除しません。
 
-**AI Coding サマリーには以下を含める必要があります**：
-- 行われた重要な決定
-- 実装された主要な変更
-- 重要な考慮事項または制限事項
+AI またはコーディングエージェントを使用したすべての PR は、プロンプト／指示を開示し、重要な判断、主な変更、重要な制約を含む AI 支援作業の要約を提出する必要があります。このゲートの対象となる貢献では、メンテナー承認済みの issue-spec Design Issue が正式な設計の記録であり、ゲートのためにプラグイン内の `design/` 文書を用意する必要はありません。ゲートを満たさない、エージェントが実質的に関与した PR は**レビュー優先度が低く**なり、メンテナーによる迅速なレビューは**保証されません**。
 
-**レビュー優先度に関する通知**：
-- AI Coding ツールを使用したが上記の要件に従わなかった場合、PR のレビュー優先度が**低下**します
-- 要件を満たしていない AI Coding PR に対して、タイムリーなレビューを**保証できません**
-- AI Coding ツールを使用せずに完了した PR の場合、これらの追加要件は適用されません
-
-これらの要件の目的は、AI で生成されたコードが十分に文書化され、追跡可能であることを保証し、コードレビューと後続のメンテナンスを容易にすることです。プロンプト/設計ドキュメントを要求することで、開発意図とコンテキストをより良く理解できます。
+定義、現在の issue-spec コマンド、適用境界、実行時検証要件の詳細は、
+[エージェント支援による貢献ポリシー](./docs/developers/agent-assisted-contributions.md)を参照してください。
 
 ### 開発前の準備
 
@@ -199,9 +187,19 @@ make prebuild && go mod tidy
 
 テストケースは歓迎されます。現在、Higress の機能テストケースが高優先度です。
 
-* 単体テストの場合、同じモジュールの test ディレクトリに xxxTest.go という名前のテストファイルを作成する必要があります。
-* 統合テストの場合、統合テストを test ディレクトリに配置できます。
-//TBD
+### 新機能のテスト要件
+
+- **新しい Wasm プラグイン**：30% 以上のコードカバレッジを持つユニットテストを含める必要があります（CI で強制チェック）。
+- **新しいコア機能**：ユニットテストを含めるべきであり、該当する場合は E2E コンフォーマンステストケースも追加すべきです。
+- **バグ修正**：回帰テストに加え、同じ固定入力と設定を使用して、影響を受ける修正前バージョンでのベースライン再現証拠と、修正後バージョンでの確認結果を提示する必要があります。実行時の動作に関する修正では、単体テストはその実行時証拠の代わりにはなりません。詳細は
+  [実行時検証ポリシー](./docs/developers/agent-assisted-contributions.md#runtime-verification-for-bug-fixes)を参照してください。
+- **パッチカバレッジ**：新規または変更されたコードは 50% のカバレッジ目標を満たす必要があります（Codecov が `codecov.yml` を通じて強制チェック）。
+
+### テストの書き方
+
+* ユニットテストの場合、同じモジュールの test ディレクトリに `xxxTest.go` という名前のテストファイルを作成します。
+* 統合テストの場合、統合テストを test ディレクトリに配置します。
+* Wasm プラグイン E2E テストの場合、`test/e2e/conformance/tests/` にテストケースを追加します。詳細は [test/README.md](./test/README.md) を参照してください。
 
 ## 何かを手伝うための参加
 

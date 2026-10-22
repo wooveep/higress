@@ -41,9 +41,11 @@ template:
     containers:
       - name: higress-gateway
         image: "{{ include "higress.image" (dict "repository" .Values.gateway.repository "hub" (.Values.gateway.hub | default .Values.global.hub) "image" (.Values.gateway.image | default "gateway") "tag" (.Values.gateway.tag | default .Chart.AppVersion)) }}"
-{{- if .Values.global.imagePullPolicy }}
+        {{- if .Values.gateway.imagePullPolicy }}
+        imagePullPolicy: {{ .Values.gateway.imagePullPolicy }}
+        {{- else if .Values.global.imagePullPolicy }}
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
-{{- end }}
+        {{- end }}
         args:
           - proxy
           - router
@@ -212,7 +214,9 @@ template:
         {{- $config := $o11y.promtail }}
       - name: promtail
         image: {{ $config.image.repository | default (printf "%s/higress/promtail" .Values.global.hub) }}:{{ $config.image.tag }}
-        imagePullPolicy: IfNotPresent
+        {{- if .Values.global.imagePullPolicy }}
+        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- end }}
         args:
           - -config.file=/etc/promtail/promtail.yaml
         env:

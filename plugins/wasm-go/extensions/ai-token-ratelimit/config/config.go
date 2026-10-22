@@ -39,16 +39,19 @@ const (
 	RemoteAddrSourceType = "remote-addr"
 	HeaderSourceType     = "header"
 
-	DefaultRejectedCode uint32 = 429
-	DefaultRejectedMsg  string = "Too many requests"
-	DefaultPriceKeyPrefix      = "billing:model-price:"
-	LimitUnitToken            = "token"
-	LimitUnitAmount           = "amount"
+	DefaultRejectedCode   uint32 = 429
+	DefaultRejectedMsg    string = "Too many requests"
+	DefaultPriceKeyPrefix        = "billing:model-price:"
+	LimitUnitToken               = "token"
+	LimitUnitAmount              = "amount"
 
 	Second           int64 = 1
 	SecondsPerMinute       = 60 * Second
 	SecondsPerHour         = 60 * SecondsPerMinute
 	SecondsPerDay          = 24 * SecondsPerHour
+
+	// MaxRuleItems 限制 rule_items 数组最大长度，对齐商业版"最多同时命中 10 条规则"。
+	MaxRuleItems = 10
 )
 
 var tokenTimeWindows = map[string]int64{
@@ -204,8 +207,6 @@ func initLimitRule(json gjson.Result, config *AiTokenRateLimitConfig) error {
 	hasRule := ruleItemsResult.Exists()
 	if !hasGlobal && !hasRule {
 		return errors.New("at least one of 'global_threshold' or 'rule_items' must be set")
-	} else if hasGlobal && hasRule {
-		return errors.New("'global_threshold' and 'rule_items' cannot be set at the same time")
 	}
 
 	// 处理全局限流配置
@@ -215,13 +216,18 @@ func initLimitRule(json gjson.Result, config *AiTokenRateLimitConfig) error {
 			return fmt.Errorf("failed to parse global_threshold: %w", err)
 		}
 		config.GlobalThreshold = threshold
-		return nil
 	}
 
 	// 处理条件限流规则
+	if !hasRule {
+		return nil
+	}
 	items := ruleItemsResult.Array()
 	if len(items) == 0 {
 		return errors.New("config rule_items cannot be empty")
+	}
+	if len(items) > MaxRuleItems {
+		return fmt.Errorf("rule_items length %d exceeds maximum %d", len(items), MaxRuleItems)
 	}
 
 	var ruleItems []LimitRuleItem
@@ -321,7 +327,7 @@ func parseLimitRuleItem(item gjson.Result, limitUnit string) (*LimitRuleItem, er
 	}
 
 	if limitType == "" {
-		return nil, errors.New("only one of 'limit_by_header' and 'limit_by_param' and 'limit_by_consumer' and 'limit_by_cookie' and 'limit_by_per_header' and 'limit_by_per_param' and 'limit_by_per_consumer' and 'limit_by_per_cookie' and 'limit_by_per_ip' can be set")
+		return nil, errors.New("at least one of 'limit_by_header', 'limit_by_param', 'limit_by_consumer', 'limit_by_cookie', 'limit_by_per_header', 'limit_by_per_param', 'limit_by_per_consumer', 'limit_by_per_cookie', 'limit_by_per_ip' must be set")
 	}
 	ruleItem.LimitType = limitType
 
@@ -337,10 +343,12 @@ func parseLimitRuleItem(item gjson.Result, limitUnit string) (*LimitRuleItem, er
 func initConfigItems(json gjson.Result, rule *LimitRuleItem, limitUnit string) error {
 	limitKeys := json.Get("limit_keys")
 	if !limitKeys.Exists() {
-		return errors.New("missing limit_keys in config")
+		return fmt.Errorf("missing limit_keys in config for %s; add at least one entry, e.g. %s",
+			rule.LimitType, exampleLimitKeyForType(rule.LimitType))
 	}
 	if len(limitKeys.Array()) == 0 {
-		return errors.New("config limit_keys cannot be empty")
+		return fmt.Errorf("config limit_keys cannot be empty for %s; add at least one entry, e.g. %s",
+			rule.LimitType, exampleLimitKeyForType(rule.LimitType))
 	}
 	var configItems []LimitConfigItem
 	for _, item := range limitKeys.Array() {
@@ -377,7 +385,12 @@ func initConfigItems(json gjson.Result, rule *LimitRuleItem, limitUnit string) e
 				}
 				itemType = RegexpType
 			} else {
-				return fmt.Errorf("the '%s' restriction must start with 'regexp:' or be exactly '*'", rule.LimitType)
+				return fmt.Errorf(
+					"the %q restriction must start with 'regexp:' or be exactly '*' (got %q); "+
+						"to match an exact name, use the non-per variant %q instead (limit_keys stay the same)",
+					string(rule.LimitType), itemKey,
+					"limit_by_"+strings.TrimPrefix(string(rule.LimitType), "limit_by_per_"),
+				)
 			}
 		} else {
 			itemType = ExactType
@@ -391,6 +404,21 @@ func initConfigItems(json gjson.Result, rule *LimitRuleItem, limitUnit string) e
 	}
 	rule.ConfigItems = configItems
 	return nil
+}
+
+func exampleLimitKeyForType(limitType LimitRuleItemType) string {
+	switch limitType {
+	case LimitByPerIpType:
+		return `key: "0.0.0.0/0"`
+	case LimitByConsumerType:
+		return `key: "<consumer-name>"`
+	case LimitByHeaderType, LimitByParamType, LimitByCookieType:
+		return `key: "<exact-value>"`
+	case LimitByPerConsumerType, LimitByPerHeaderType, LimitByPerParamType, LimitByPerCookieType:
+		return `key: "*"`
+	default:
+		return `key: "<value>"`
+	}
 }
 
 func createConfigItemFromRate(item gjson.Result, itemType LimitConfigItemType, key string, ipNet *iptree.IPTree, regexp *re.Regexp, limitUnit string) (*LimitConfigItem, error) {

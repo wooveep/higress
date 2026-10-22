@@ -23,12 +23,12 @@ Your interest in contributing to Higress is warmly welcomed. First, we encourage
 
 ## Reporting security issues
 
-Security issues are always treated seriously. As our usual principle, we discourage anyone to spread security issues. If you find a security issue of Higress, please do not discuss it in public and even do not open a public issue. Instead we encourage you to send us a private email to  [higress@googlegroups.com](mailto:higress@googlegroups.com) to report this.
+Security issues are always treated seriously. As our usual principle, we discourage anyone to spread security issues. If you find a security issue of Higress, please do not discuss it in public and even do not open a public issue. Instead please follow the process described in [`SECURITY.md`](./SECURITY.md) to report vulnerabilities privately.
 
 ## Reporting general issues
 
 To be honest, we regard every user of Higress as a very kind contributor. After experiencing Higress, you may have 
-some feedback for the project. Then feel free to open an issue via [NEW ISSUE](https://github.com/alibaba/higress/issues/new/choose).
+some feedback for the project. Then feel free to open an issue via [NEW ISSUE](https://github.com/higress-group/higress/issues/new/choose).
 
 Since we collaborate project Higress in a distributed way, we appreciate **WELL-WRITTEN**, **DETAILED**, **EXPLICIT** issue reports. To make the communication more efficient, we wish everyone could search if your issue is an existing one in the searching list. If you find it existing, please add your details in comments under the existing issue instead of opening a brand new one.
 
@@ -79,15 +79,15 @@ Since you are ready to improve Higress with a PR, we suggest you could take a lo
 
 To put forward a PR, we assume you have registered a GitHub ID. Then you could finish the preparation in the following steps:
 
-1. **FORK** Higress to your repository. To make this work, you just need to click the button Fork in right-left of[alibaba/higress](https://github.com/alibaba/higress) main page. Then you will end up with your repository in 
+1. **FORK** Higress to your repository. To make this work, you just need to click the button Fork on the right side of [higress-group/higress](https://github.com/higress-group/higress) main page. Then you will end up with your repository in 
    `https://github.com/<your-username>/higress`, in which `your-username` is your GitHub username.
 
 1. **CLONE** your own repository to develop locally. Use `git clone git@github.com:<your-username>/higress.git` to clone repository to your local machine. Then you can create new branches to finish the change you wish to make.
 
-1. **Set Remote** upstream to be `git@github.com:alibaba/higress.git` using the following two commands:
+1. **Set Remote** upstream to be `git@github.com:higress-group/higress.git` using the following two commands:
 
 ```bash
-git remote add upstream git@github.com:alibaba/higress.git
+git remote add upstream git@github.com:higress-group/higress.git
 git remote set-url --push upstream no-pushing
 ```
 
@@ -97,7 +97,7 @@ With this remote setting, you can check your git remote configuration like this:
 $ git remote -v
 origin     git@github.com:<your-username>/higress.git (fetch)
 origin     git@github.com:<your-username>/higress.git (push)
-upstream   git@github.com:alibaba/higress.git (fetch)
+upstream   git@github.com:higress-group/higress.git (fetch)
 upstream   no-pushing (push)
 ```
 
@@ -105,7 +105,7 @@ Adding this, we can easily synchronize local branches with upstream branches.
 
 ### Branch Definition
 
-Right now we assume every contribution via pull request is for [branch main](https://github.com/alibaba/higress/tree/main) in Higress. Before contributing, be aware of branch definition would help a lot.
+Right now we assume every contribution via pull request is for [branch main](https://github.com/higress-group/higress/tree/main) in Higress. Before contributing, be aware of branch definition would help a lot.
 
 As a contributor, keep in mind again that every contribution via pull request is for branch main. While in project Higress, there are several other branches, we generally call them release branches (such as 0.6.0,0.6.1), feature branches, hotfix branches.
 
@@ -142,7 +142,7 @@ On the other side, we discourage contributors from committing message like the f
 * ~~update~~
 * ~~add doc~~
 
-If you get lost, please see [How to Write a Git Commit Message](http://chris.beams.io/posts/git-commit/) for a start.
+If you get lost, please see [How to Write a Git Commit Message](https://chris.beams.io/posts/git-commit/) for a start.
 
 #### Commit Content
 
@@ -169,30 +169,49 @@ No matter commit message, or commit content, we do take more emphasis on code re
 
 PR is the only way to make change to Higress project files. To help reviewers better get your purpose, PR description could not be too detailed. We encourage contributors to follow the [PR template](./.github/PULL_REQUEST_TEMPLATE.md) to finish the pull request.
 
-#### Special Requirements for AI Coding Tool Usage
+#### Mandatory gate for materially agent-assisted contributions
 
-If you use AI Coding tools (such as Cursor, GitHub Copilot, etc.) to generate PRs, we have the following **strict requirements**:
+If an AI or coding agent materially participates in analysis, design,
+implementation, testing, or PR preparation, the contribution **MUST** enter the
+Higress issue-spec workflow before implementation begins. A Higress maintainer
+must approve the Proposal and Design Issues first. Implementation must follow
+the approved Design and authorized implementation TASKs. The Design must
+contain a concrete Verification Plan before verification starts, and the
+corresponding verification TASKs must be completed with evidence before asking
+maintainers to accept the verification or review.
 
-**For new standalone plugin scenarios** (e.g., newly implemented wasm plugins or golang-filter plugins):
-- You **MUST** create a `design/` directory under the plugin directory
-- Place the design document you provided to the AI Coding tool in the `design/` directory
-- Provide an AI Coding summary in the PR description
+Material participation includes substantive analysis or design, choosing an
+implementation or verification approach, producing or materially transforming
+code/tests/docs/configuration, interpreting test results, or preparing
+substantive PR content. Mechanical autocomplete that the author independently
+directs and verifies is not automatically material. The only exception is
+declared agent use limited to spelling, punctuation, whitespace, or formatting
+with no substantive choice or behavioral effect. Human-only PRs are unaffected.
 
-**For regular updates/changes scenarios**:
-- Provide the prompts/instructions you gave to the AI Coding tool in the PR description
-- Provide an AI Coding summary in the PR description
+A canonical-repository maintainer or administrator may elect to bypass the
+planning gate only after using authenticated `gh` to verify the current login
+and a canonical-repository collaborator `role_name` of `maintain` or `admin` for
+`higress-group/higress`. The PR must select the verified-maintainer/
+administrator exception, ensure its GitHub author matches that login, record the
+current PR number or URL, login, returned `role_name`, PR author (never a token),
+attest that `GH_TOKEN` and `GITHUB_TOKEN` were unset for every verification
+command, and explain the bypass. A failed or mismatched check disqualifies the
+exception; the accepting or merging maintainer independently validates current
+live evidence with token overrides unset. This does not waive AI disclosure,
+review, merge requirements, or runtime verification for bug fixes.
 
-**AI Coding Summary should include**:
-- Key decisions made
-- Major changes implemented
-- Important considerations or limitations
+All PRs that used an AI or coding agent must disclose the prompts/instructions
+and provide an AI-assisted work summary with key decisions, major changes, and
+important limitations. For contributions subject to this gate, the
+maintainer-approved issue-spec Design Issue is the authoritative design
+carrier; no plugin-local `design/` document is required for the gate.
+Materially agent-assisted PRs that do not satisfy the gate receive **lower
+review priority**, and timely maintainer review is **not guaranteed**.
 
-**Review Priority Notice**:
-- If you use AI Coding tools but do not follow the above requirements, your PR review priority will be **lowered**
-- We **cannot guarantee** timely reviews for AI Coding PRs that do not meet these requirements
-- If the PR is not completed using AI Coding tools, these additional requirements do not apply
-
-The purpose of these requirements is to ensure that AI-generated code is adequately documented and traceable, facilitating code review and subsequent maintenance. By requiring prompts/design documents, we can better understand the development intent and context.
+See the canonical
+[agent-assisted contribution policy](./docs/developers/agent-assisted-contributions.md)
+for definitions, current issue-spec commands, enforcement boundaries, and
+runtime-verification requirements.
 
 ### Pre-development preparation
 
@@ -204,9 +223,22 @@ make prebuild && go mod tidy
 
 Any test case would be welcomed. Currently, Higress function test cases are high priority.
 
-* For unit test, you need to create a test file named `xxxTest.go` in the test directory of the same module.
-* For integration test, you can put the integration test in the test directory. 
-//TBD
+### Test requirements for new functionality
+
+- **New Wasm plugins**: MUST include unit tests with at least 30% code coverage (enforced by CI).
+- **New core features**: SHOULD include unit tests and, where applicable, E2E conformance test cases.
+- **Bug fixes**: MUST include a regression test and affected/pre-fix baseline
+  reproduction plus fixed-version confirmation using the same pinned inputs
+  and configuration. When the claim concerns runtime behavior, unit tests do
+  not replace that runtime evidence; see the
+  [runtime-verification policy](./docs/developers/agent-assisted-contributions.md#runtime-verification-for-bug-fixes).
+- **Patch coverage**: New or changed code must meet a 50% coverage target for the patch (enforced by Codecov via `codecov.yml`).
+
+### How to write tests
+
+* For unit tests, create a test file named `xxxTest.go` in the test directory of the same module.
+* For integration tests, you can put the integration test in the test directory.
+* For Wasm plugin E2E tests, add test cases in `test/e2e/conformance/tests/`. See [test/README.md](./test/README.md) for details.
 ## Engage to help anything
 
 We choose GitHub as the primary place for Higress to collaborate. So the latest updates of Higress are always here. Although contributions via PR is an explicit way to help, we still call for any other ways.

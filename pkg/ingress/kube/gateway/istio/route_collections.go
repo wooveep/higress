@@ -23,9 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
-	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gatewayalpha "sigs.k8s.io/gateway-api/apis/v1alpha2"
-	gateway "sigs.k8s.io/gateway-api/apis/v1beta1"
+	gateway "sigs.k8s.io/gateway-api/apis/v1"
 
 	istio "istio.io/api/networking/v1alpha3"
 	networkingclient "istio.io/client-go/pkg/apis/networking/v1"
@@ -39,6 +37,8 @@ import (
 	"istio.io/istio/pkg/ptr"
 	"istio.io/istio/pkg/slices"
 	"istio.io/istio/pkg/util/sets"
+
+	"github.com/alibaba/higress/v2/pkg/ingress/kube/util"
 )
 
 type AncestorBackend struct {
@@ -71,8 +71,11 @@ func HTTPRouteCollection(
 	) {
 		ctx := inputs.WithCtx(krtctx)
 		inferencePoolCfgPairs := []struct {
-			name string
-			cfg  *inferencePoolConfig
+			name       string
+			route      *istio.HTTPRoute
+			cfg        *inferencePoolConfig
+			ruleIndex  int
+			matchIndex int
 		}{}
 		status := obj.Status.DeepCopy()
 		route := obj.Spec
@@ -84,16 +87,19 @@ func HTTPRouteCollection(
 					if len(matches) == 0 {
 						matches = append(matches, nil)
 					}
-					for _, m := range matches {
+					for matchIndex, m := range matches {
 						if m != nil {
 							r.Matches = []gateway.HTTPRouteMatch{*m}
 						}
 						istioRoute, ipCfg, configErr := convertHTTPRoute(ctx, r, obj, n, !mesh)
-						if istioRoute != nil && ipCfg != nil && ipCfg.enableExtProc {
+						if istioRoute != nil && ipCfg != nil {
 							inferencePoolCfgPairs = append(inferencePoolCfgPairs, struct {
-								name string
-								cfg  *inferencePoolConfig
-							}{name: istioRoute.Name, cfg: ipCfg})
+								name       string
+								route      *istio.HTTPRoute
+								cfg        *inferencePoolConfig
+								ruleIndex  int
+								matchIndex int
+							}{name: istioRoute.Name, route: istioRoute, cfg: ipCfg, ruleIndex: n, matchIndex: matchIndex})
 						}
 						if !yield(istioRoute, configErr) {
 							return
@@ -102,6 +108,23 @@ func HTTPRouteCollection(
 				}
 			}
 		})
+
+		// Upstream route names are preserved unless duplicate names would make
+		// BuiltIn and External picker rules target the same final Envoy routes.
+		modesByRouteName := map[string]sets.Set[kube.InferencePoolEndpointPickerMode]{}
+		for _, pair := range inferencePoolCfgPairs {
+			if modesByRouteName[pair.name] == nil {
+				modesByRouteName[pair.name] = sets.New[kube.InferencePoolEndpointPickerMode]()
+			}
+			modesByRouteName[pair.name].Insert(pair.cfg.mode)
+		}
+		for i := range inferencePoolCfgPairs {
+			pair := &inferencePoolCfgPairs[i]
+			if modesByRouteName[pair.name].Len() > 1 {
+				disambiguateHTTPRouteName(pair.route, pair.ruleIndex, pair.matchIndex)
+				pair.name = pair.route.Name
+			}
+		}
 
 		// routeRuleToInferencePoolCfg stores inference pool configs discovered during route rule conversion,
 		// keyed by the istio.HTTPRoute.Name.
@@ -148,7 +171,12 @@ func HTTPRouteCollection(
 			}
 			// Create one VS per hostname with a single hostname.
 			// This ensures we can treat each hostname independently, as the spec requires
-			for _, h := range vsHosts {
+			processedHosts := sets.New[string]()
+			for _, routeHost := range vsHosts {
+				h, ok := parent.hostnameIntersection(routeHost)
+				if !ok || processedHosts.InsertContains(h) {
+					continue
+				}
 				if !parent.hostnameAllowedByIsolation(h) {
 					// TODO: standardize a status message for this upstream and report
 					continue
@@ -162,6 +190,7 @@ func HTTPRouteCollection(
 				for _, httpRule := range routes { // These are []*istio.HTTPRoute
 					if ipCfg, found := routeRuleToInferencePoolCfg[httpRule.Name]; found {
 						currentRouteInferenceConfigs[httpRule.Name] = kube.InferencePoolRouteRuleConfig{
+							Mode:             ipCfg.mode,
 							FQDN:             ipCfg.endpointPickerDst,
 							Port:             ipCfg.endpointPickerPort,
 							FailureModeAllow: ipCfg.endpointPickerFailureMode == string(inferencev1.EndpointPickerFailOpen),
@@ -205,6 +234,15 @@ func HTTPRouteCollection(
 		Status:           status,
 		Ancestors:        ancestorBackends,
 	}
+}
+
+func disambiguateHTTPRouteName(route *istio.HTTPRoute, ruleIndex, matchIndex int) {
+	if route == nil {
+		return
+	}
+	// Kubernetes resource names cannot contain '/', so the suffix cannot collide
+	// with the undisambiguated name of another HTTPRoute resource.
+	route.Name = fmt.Sprintf("%s/%d/%d", route.Name, ruleIndex, matchIndex)
 }
 
 func extractAncestorBackends[RT, BT any](ns string, prefs []gateway.ParentReference, rules []RT, extract func(RT) []BT) []AncestorBackend {
@@ -257,18 +295,18 @@ type conversionResult[O any] struct {
 }
 
 func GRPCRouteCollection(
-	grpcRoutes krt.Collection[*gatewayv1.GRPCRoute],
+	grpcRoutes krt.Collection[*gateway.GRPCRoute],
 	inputs RouteContextInputs,
 	opts krt.OptionsBuilder,
-) RouteResult[*gatewayv1.GRPCRoute, gatewayv1.GRPCRouteStatus] {
+) RouteResult[*gateway.GRPCRoute, gateway.GRPCRouteStatus] {
 	routeCount := gatewayRouteAttachmentCountCollection(inputs, grpcRoutes, gvk.GRPCRoute, opts)
-	ancestorBackends := krt.NewManyCollection(grpcRoutes, func(krtctx krt.HandlerContext, obj *gatewayv1.GRPCRoute) []AncestorBackend {
-		return extractAncestorBackends(obj.Namespace, obj.Spec.ParentRefs, obj.Spec.Rules, func(r gatewayv1.GRPCRouteRule) []gatewayv1.GRPCBackendRef {
+	ancestorBackends := krt.NewManyCollection(grpcRoutes, func(krtctx krt.HandlerContext, obj *gateway.GRPCRoute) []AncestorBackend {
+		return extractAncestorBackends(obj.Namespace, obj.Spec.ParentRefs, obj.Spec.Rules, func(r gateway.GRPCRouteRule) []gateway.GRPCBackendRef {
 			return r.BackendRefs
 		})
 	}, opts.WithName("GRPCAncestors")...)
-	status, baseVirtualServices := krt.NewStatusManyCollection(grpcRoutes, func(krtctx krt.HandlerContext, obj *gatewayv1.GRPCRoute) (
-		*gatewayv1.GRPCRouteStatus,
+	status, baseVirtualServices := krt.NewStatusManyCollection(grpcRoutes, func(krtctx krt.HandlerContext, obj *gateway.GRPCRoute) (
+		*gateway.GRPCRouteStatus,
 		[]RouteWithKey,
 	) {
 		ctx := inputs.WithCtx(krtctx)
@@ -277,7 +315,7 @@ func GRPCRouteCollection(
 		routeRuleToInferencePoolCfg := make(map[string]*inferencePoolConfig)
 		status := obj.Status.DeepCopy()
 		route := obj.Spec
-		parentStatus, parentRefs, meshResult, gwResult := computeRoute(ctx, obj, func(mesh bool, obj *gatewayv1.GRPCRoute) iter.Seq2[*istio.HTTPRoute, *ConfigError] {
+		parentStatus, parentRefs, meshResult, gwResult := computeRoute(ctx, obj, func(mesh bool, obj *gateway.GRPCRoute) iter.Seq2[*istio.HTTPRoute, *ConfigError] {
 			return func(yield func(*istio.HTTPRoute, *ConfigError) bool) {
 				for n, r := range route.Rules {
 					// split the rule to make sure each rule has up to one match
@@ -287,7 +325,7 @@ func GRPCRouteCollection(
 					}
 					for _, m := range matches {
 						if m != nil {
-							r.Matches = []gatewayv1.GRPCRouteMatch{*m}
+							r.Matches = []gateway.GRPCRouteMatch{*m}
 						}
 						// GRPCRoute conversion currently doesn't return ipCfg.
 						istioRoute, configErr := convertGRPCRoute(ctx, r, obj, n, !mesh)
@@ -341,7 +379,12 @@ func GRPCRouteCollection(
 			}
 			// Create one VS per hostname with a single hostname.
 			// This ensures we can treat each hostname independently, as the spec requires
-			for _, h := range vsHosts {
+			processedHosts := sets.New[string]()
+			for _, routeHost := range vsHosts {
+				h, ok := parent.hostnameIntersection(routeHost)
+				if !ok || processedHosts.InsertContains(h) {
+					continue
+				}
 				if !parent.hostnameAllowedByIsolation(h) {
 					// TODO: standardize a status message for this upstream and report
 					continue
@@ -355,6 +398,7 @@ func GRPCRouteCollection(
 				for _, httpRule := range routes {
 					if ipCfg, found := routeRuleToInferencePoolCfg[httpRule.Name]; found { // This map will be empty for GRPCRoute for now
 						currentRouteInferenceConfigs[httpRule.Name] = kube.InferencePoolRouteRuleConfig{
+							Mode:             ipCfg.mode,
 							FQDN:             ipCfg.endpointPickerDst,
 							Port:             ipCfg.endpointPickerPort,
 							FailureModeAllow: ipCfg.endpointPickerFailureMode == string(inferencev1.EndpointPickerFailOpen),
@@ -392,7 +436,7 @@ func GRPCRouteCollection(
 	}, opts.WithName("GRPCRoute")...)
 
 	finalVirtualServices := mergeHTTPRoutes(baseVirtualServices, opts.WithName("GRPCRouteMerged")...)
-	return RouteResult[*gatewayv1.GRPCRoute, gatewayv1.GRPCRouteStatus]{
+	return RouteResult[*gateway.GRPCRoute, gateway.GRPCRouteStatus]{
 		VirtualServices:  finalVirtualServices,
 		RouteAttachments: routeCount,
 		Status:           status,
@@ -401,25 +445,25 @@ func GRPCRouteCollection(
 }
 
 func TCPRouteCollection(
-	tcpRoutes krt.Collection[*gatewayalpha.TCPRoute],
+	tcpRoutes krt.Collection[*gateway.TCPRoute],
 	inputs RouteContextInputs,
 	opts krt.OptionsBuilder,
-) RouteResult[*gatewayalpha.TCPRoute, gatewayalpha.TCPRouteStatus] {
+) RouteResult[*gateway.TCPRoute, gateway.TCPRouteStatus] {
 	routeCount := gatewayRouteAttachmentCountCollection(inputs, tcpRoutes, gvk.TCPRoute, opts)
-	ancestorBackends := krt.NewManyCollection(tcpRoutes, func(krtctx krt.HandlerContext, obj *gatewayalpha.TCPRoute) []AncestorBackend {
-		return extractAncestorBackends(obj.Namespace, obj.Spec.ParentRefs, obj.Spec.Rules, func(r gatewayalpha.TCPRouteRule) []gateway.BackendRef {
+	ancestorBackends := krt.NewManyCollection(tcpRoutes, func(krtctx krt.HandlerContext, obj *gateway.TCPRoute) []AncestorBackend {
+		return extractAncestorBackends(obj.Namespace, obj.Spec.ParentRefs, obj.Spec.Rules, func(r gateway.TCPRouteRule) []gateway.BackendRef {
 			return r.BackendRefs
 		})
 	}, opts.WithName("TCPAncestors")...)
-	status, virtualServices := krt.NewStatusManyCollection(tcpRoutes, func(krtctx krt.HandlerContext, obj *gatewayalpha.TCPRoute) (
-		*gatewayalpha.TCPRouteStatus,
-		[]*config.Config,
+	status, baseVirtualServices := krt.NewStatusManyCollection(tcpRoutes, func(krtctx krt.HandlerContext, obj *gateway.TCPRoute) (
+		*gateway.TCPRouteStatus,
+		[]RouteWithKey,
 	) {
 		ctx := inputs.WithCtx(krtctx)
 		status := obj.Status.DeepCopy()
 		route := obj.Spec
 		parentStatus, parentRefs, meshResult, gwResult := computeRoute(ctx, obj,
-			func(mesh bool, obj *gatewayalpha.TCPRoute) iter.Seq2[*istio.TCPRoute, *ConfigError] {
+			func(mesh bool, obj *gateway.TCPRoute) iter.Seq2[*istio.TCPRoute, *ConfigError] {
 				return func(yield func(*istio.TCPRoute, *ConfigError) bool) {
 					for _, r := range route.Rules {
 						if !yield(convertTCPRoute(ctx, r, obj, !mesh)) {
@@ -430,7 +474,7 @@ func TCPRouteCollection(
 			})
 		status.Parents = parentStatus
 
-		vs := []*config.Config{}
+		vs := []RouteWithKey{}
 		count := 0
 		for _, parent := range filteredReferences(parentRefs) {
 			routes := gwResult.routes
@@ -460,7 +504,7 @@ func TCPRouteCollection(
 				name := fmt.Sprintf("%s-tcp-%d-%s", obj.Name, count, constants.KubernetesGatewayName)
 				// Create one VS per hostname with a single hostname.
 				// This ensures we can treat each hostname independently, as the spec requires
-				vs = append(vs, &config.Config{
+				cfg := &config.Config{
 					Meta: config.Meta{
 						CreationTimestamp: obj.CreationTimestamp.Time,
 						GroupVersionKind:  gvk.VirtualService,
@@ -476,6 +520,10 @@ func TCPRouteCollection(
 						Gateways: []string{parent.InternalName},
 						Tcp:      routes,
 					},
+				}
+				vs = append(vs, RouteWithKey{
+					Config: cfg,
+					Key:    parent.InternalName + "/" + host,
 				})
 				count++
 			}
@@ -483,7 +531,8 @@ func TCPRouteCollection(
 		return status, vs
 	}, opts.WithName("TCPRoute")...)
 
-	return RouteResult[*gatewayalpha.TCPRoute, gatewayalpha.TCPRouteStatus]{
+	virtualServices := selectOldestRoute(baseVirtualServices, opts.WithName("TCPRouteSelected")...)
+	return RouteResult[*gateway.TCPRoute, gateway.TCPRouteStatus]{
 		VirtualServices:  virtualServices,
 		RouteAttachments: routeCount,
 		Status:           status,
@@ -491,26 +540,51 @@ func TCPRouteCollection(
 	}
 }
 
+// selectOldestRoute enforces the Gateway API conflict rule for route kinds
+// where only one Route may bind to a listener. All routes remain attached and
+// Accepted, but only the oldest route configures traffic for the listener.
+func selectOldestRoute(baseVirtualServices krt.Collection[RouteWithKey], opts ...krt.CollectionOption) krt.Collection[*config.Config] {
+	idx := krt.NewIndex(baseVirtualServices, "key", func(o RouteWithKey) []string {
+		return []string{o.Key}
+	}).AsCollection(opts...)
+	return krt.NewCollection(idx, func(ctx krt.HandlerContext, object krt.IndexObject[string, RouteWithKey]) **config.Config {
+		configs := object.Objects
+		if len(configs) == 0 {
+			return nil
+		}
+		sortRoutesByCreationTime(configs)
+		selected := configs[0].Config
+		meta := selected.Meta.DeepCopy()
+		meta.Name = strings.ReplaceAll(object.Key, "/", "~")
+		return ptr.Of(&config.Config{
+			Meta:   meta,
+			Spec:   selected.Spec,
+			Status: selected.Status,
+			Extra:  selected.Extra,
+		})
+	}, opts...)
+}
+
 func TLSRouteCollection(
-	tlsRoutes krt.Collection[*gatewayalpha.TLSRoute],
+	tlsRoutes krt.Collection[*gateway.TLSRoute],
 	inputs RouteContextInputs,
 	opts krt.OptionsBuilder,
-) RouteResult[*gatewayalpha.TLSRoute, gatewayalpha.TLSRouteStatus] {
+) RouteResult[*gateway.TLSRoute, gateway.TLSRouteStatus] {
 	routeCount := gatewayRouteAttachmentCountCollection(inputs, tlsRoutes, gvk.TLSRoute, opts)
-	ancestorBackends := krt.NewManyCollection(tlsRoutes, func(krtctx krt.HandlerContext, obj *gatewayalpha.TLSRoute) []AncestorBackend {
-		return extractAncestorBackends(obj.Namespace, obj.Spec.ParentRefs, obj.Spec.Rules, func(r gatewayalpha.TLSRouteRule) []gateway.BackendRef {
+	ancestorBackends := krt.NewManyCollection(tlsRoutes, func(krtctx krt.HandlerContext, obj *gateway.TLSRoute) []AncestorBackend {
+		return extractAncestorBackends(obj.Namespace, obj.Spec.ParentRefs, obj.Spec.Rules, func(r gateway.TLSRouteRule) []gateway.BackendRef {
 			return r.BackendRefs
 		})
 	}, opts.WithName("TLSAncestors")...)
-	status, virtualServices := krt.NewStatusManyCollection(tlsRoutes, func(krtctx krt.HandlerContext, obj *gatewayalpha.TLSRoute) (
-		*gatewayalpha.TLSRouteStatus,
+	status, virtualServices := krt.NewStatusManyCollection(tlsRoutes, func(krtctx krt.HandlerContext, obj *gateway.TLSRoute) (
+		*gateway.TLSRouteStatus,
 		[]*config.Config,
 	) {
 		ctx := inputs.WithCtx(krtctx)
 		status := obj.Status.DeepCopy()
 		route := obj.Spec
 		parentStatus, parentRefs, meshResult, gwResult := computeRoute(ctx,
-			obj, func(mesh bool, obj *gatewayalpha.TLSRoute) iter.Seq2[*istio.TLSRoute, *ConfigError] {
+			obj, func(mesh bool, obj *gateway.TLSRoute) iter.Seq2[*istio.TLSRoute, *ConfigError] {
 				return func(yield func(*istio.TLSRoute, *ConfigError) bool) {
 					for _, r := range route.Rules {
 						if !yield(convertTLSRoute(ctx, r, obj, !mesh)) {
@@ -545,9 +619,14 @@ func TLSRouteCollection(
 				}
 				routes = augmentTLSPortMatch(routes, parent.OriginalReference.Port, vsHosts)
 			}
-			for _, host := range vsHosts {
+			processedHosts := sets.New[string]()
+			for _, routeHost := range vsHosts {
+				host, ok := parent.hostnameIntersection(routeHost)
+				if !ok || processedHosts.InsertContains(host) {
+					continue
+				}
 				name := fmt.Sprintf("%s-tls-%d-%s", obj.Name, count, constants.KubernetesGatewayName)
-				filteredRoutes := routes
+				filteredRoutes := setTLSRouteHost(routes, host)
 				if parent.IsMesh() {
 					filteredRoutes = compatibleRoutesForHost(routes, host)
 				}
@@ -573,7 +652,7 @@ func TLSRouteCollection(
 		}
 		return status, vs
 	}, opts.WithName("TLSRoute")...)
-	return RouteResult[*gatewayalpha.TLSRoute, gatewayalpha.TLSRouteStatus]{
+	return RouteResult[*gateway.TLSRoute, gateway.TLSRouteStatus]{
 		VirtualServices:  virtualServices,
 		RouteAttachments: routeCount,
 		Status:           status,
@@ -601,6 +680,17 @@ func computeRoute[T controllers.Object, O comparable](ctx RouteContext, obj T, t
 			if err != nil {
 				res.error = err
 			}
+			// Start - Added by Higress
+			// A route whose spec could not be inspected for secret references must not be
+			// emitted: its references would be resolved against whichever namespace the
+			// merged config carries.
+			if defuseErr := defuseRouteSecretTemplates(obj, vs); defuseErr != nil {
+				return conversionResult[O]{error: &ConfigError{
+					Reason:  InvalidConfiguration,
+					Message: defuseErr.Error(),
+				}}
+			}
+			// End - Added by Higress
 			res.routes = append(res.routes, vs)
 		}
 		return res
@@ -622,6 +712,25 @@ func computeRoute[T controllers.Object, O comparable](ctx RouteContext, obj T, t
 	parents := createRouteStatus(rpResults, obj.GetNamespace(), obj.GetGeneration(), GetCommonRouteStateParents(obj))
 	return parents, parentRefs, meshResult, gwResult
 }
+
+// Start - Added by Higress
+
+// defuseRouteSecretTemplates restricts the secret templates a Gateway API object put into a
+// converted route to that object's own namespace.
+//
+// This has to happen here, while the source object is still in scope. Routes are merged by
+// parent and host, so a merged VirtualService can carry routes from several namespaces under
+// the namespace of only one of them, and configs derived from routes are re-stamped with the
+// Higress system namespace afterwards. Neither leaves the owner recoverable from a generated
+// config, so resolving templates against that namespace would let a tenant reference secrets
+// in any namespace it can name.
+func defuseRouteSecretTemplates(obj controllers.Object, route any) error {
+	_, err := util.DefuseSpecTemplates(route, obj.GetNamespace(),
+		fmt.Sprintf("route %s/%s", obj.GetNamespace(), obj.GetName()))
+	return err
+}
+
+// End - Added by Higress
 
 // RouteContext defines a common set of inputs to a route collection. This should be built once per route translation and
 // not shared outside of that.
@@ -766,12 +875,63 @@ func mergeHTTPRoutes(baseVirtualServices krt.Collection[RouteWithKey], opts ...k
 		sortRoutesByCreationTime(configs)
 		base := configs[0].DeepCopy()
 		baseVS := base.Spec.(*istio.VirtualService)
-		for _, config := range configs[1:] {
+		// Deep copy the InferencePool configs map to avoid race conditions
+		// The default DeepCopy() only does shallow copy of Extra field
+		if base.Extra != nil {
+			if ipConfigs, ok := base.Extra[constants.ConfigExtraPerRouteRuleInferencePoolConfigs].(map[string]kube.InferencePoolRouteRuleConfig); ok {
+				// Create a new map to avoid modifying the shared underlying map
+				newIPConfigs := make(map[string]kube.InferencePoolRouteRuleConfig, len(ipConfigs))
+				for k, v := range ipConfigs {
+					newIPConfigs[k] = v
+				}
+				base.Extra[constants.ConfigExtraPerRouteRuleInferencePoolConfigs] = newIPConfigs
+			}
+		}
+		for i, config := range configs[1:] {
 			thisVS := config.Spec.(*istio.VirtualService)
 			baseVS.Http = append(baseVS.Http, thisVS.Http...)
 			// append parents
 			base.Annotations[constants.InternalParentNames] = fmt.Sprintf("%s,%s",
 				base.Annotations[constants.InternalParentNames], config.Annotations[constants.InternalParentNames])
+			// Merge Extra field (especially for InferencePool configs)
+			if base.Extra == nil && config.Extra != nil {
+				base.Extra = make(map[string]any)
+			}
+			if config.Extra != nil {
+				for k, v := range config.Extra {
+					// For non-InferencePool configs, keep the first value for stability
+					if k != constants.ConfigExtraPerRouteRuleInferencePoolConfigs {
+						if _, exists := base.Extra[k]; !exists {
+							base.Extra[k] = v
+						}
+						continue
+					}
+					// For InferencePool configs, merge the maps
+					baseMap, baseOk := base.Extra[k].(map[string]kube.InferencePoolRouteRuleConfig)
+					configMap, configOk := v.(map[string]kube.InferencePoolRouteRuleConfig)
+					if baseOk && configOk {
+						log.Debugf("Merging InferencePool configs: adding %d route configs from VirtualService %d to base (namespace=%s)",
+							len(configMap), i+1, config.Namespace)
+						// Route names are composed of the HTTPRoute/VirtualService namespaced name so they can't possibly conflict
+						for routeName, routeConfig := range configMap {
+							baseMap[routeName] = routeConfig
+						}
+					} else if configOk {
+						if _, exists := base.Extra[k]; !exists {
+							log.Debugf("Creating new InferencePool config map from VirtualService %d (namespace=%s)", i+1, config.Namespace)
+							base.Extra[k] = v
+						}
+					} else if !configOk {
+						log.Debugf("Skipping InferencePool config from VirtualService %d due to unexpected type (namespace=%s)", i+1, config.Namespace)
+					}
+				}
+			}
+		}
+		// Log final merged InferencePool configs
+		if base.Extra != nil {
+			if ipConfigs, ok := base.Extra[constants.ConfigExtraPerRouteRuleInferencePoolConfigs].(map[string]kube.InferencePoolRouteRuleConfig); ok {
+				log.Debugf("Final merged VirtualService for key %s has %d InferencePool route configs", object.Key, len(ipConfigs))
+			}
 		}
 		sortHTTPRoutes(baseVS.Http)
 		base.Name = strings.ReplaceAll(object.Key, "/", "~")

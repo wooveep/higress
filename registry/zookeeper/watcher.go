@@ -30,7 +30,7 @@ import (
 	"github.com/hashicorp/go-multierror"
 	"go.uber.org/atomic"
 	"istio.io/api/networking/v1alpha3"
-	"istio.io/pkg/log"
+	"istio.io/istio/pkg/log"
 
 	apiv1 "github.com/alibaba/higress/v2/api/networking/v1"
 	"github.com/alibaba/higress/v2/pkg/common"
@@ -634,7 +634,11 @@ func (w *watcher) generateServiceEntry(config InterfaceConfig) *v1alpha3.Service
 		if service.Metadata != nil && service.Metadata[PROTOCOL] != "" {
 			protocol = common.ParseProtocol(service.Metadata[PROTOCOL])
 		}
-		portNumber, _ := strconv.Atoi(service.Port)
+		portNumber, err := strconv.ParseUint(service.Port, 10, 16)
+		if err != nil || portNumber == 0 {
+			log.Warnf("skip zookeeper endpoint %s with invalid port %q", service.Ip, service.Port)
+			continue
+		}
 		port := &v1alpha3.ServicePort{
 			Name:     protocol.String(),
 			Number:   uint32(portNumber),
@@ -665,7 +669,7 @@ func (w *watcher) Run() {
 	defer func() {
 		log.Info("[zookeeper] Run is down")
 		if r := recover(); r != nil {
-			log.Info("Recovered in f", "r is", r)
+			log.Infof("Recovered in Run: %v", r)
 		}
 	}()
 	ticker := time.NewTicker(30 * time.Second)

@@ -29,6 +29,7 @@ Users can also expand observable values ​​through configuration:
 | `attributes` | []Attribute | optional  | -   | Information that the user wants to record in log/span |
 | `disable_openai_usage` | bool | optional  | false   | When using a non-OpenAI-compatible protocol, the support for model and token is non-standard. Setting the configuration to true can prevent errors. |
 | `value_length_limit` | int | optional  | 4000   | length limit for each value |
+| `max_request_body_bytes` | int | optional  | 104857600 (100 MiB)   | Maximum number of bytes to buffer for the request body. Supports route-level overrides via matchRules, preventing large non-AI uploads (e.g. multipart/form-data) from being rejected by Envoy with HTTP 413. Must be between 1 and 209715200 (200 MiB, the plugin VM memory rebuild ceiling); a value outside that range or a non-number fails config loading |
 | `enable_path_suffixes`   | []string    | optional | ["/v1/chat/completions","/v1/completions","/v1/embeddings","/v1/models","/generateContent","/streamGenerateContent"] | Only effective for requests with these specific path suffixes, can be configured as "\*" to match all paths                                         |
 | `enable_content_types` | []string    | optional | ["text/event-stream","application/json"]                                                                             | Only buffer response body for these content types                                                                                                   |
 | `session_id_header` | string | optional  | -   | Specify the header name to read session ID from. If not configured, it will automatically search in the following priority: `x-openclaw-session-key`, `x-clawdbot-session-key`, `x-moltbot-session-key`, `x-agent-session`. Session ID can be used to trace multi-turn Agent conversations |
@@ -61,6 +62,8 @@ When `value_source` is `response_streaming_body`, `rule` should be configured to
 - `first`: extract value from the first valid chunk
 - `replace`: extract value from the last valid chunk
 - `append`: join value pieces from all valid chunks
+
+Note: for `first` and `replace`, a valid chunk excludes missing paths, JSON `null`, and empty string `""` results. If no chunk contains a valid value, the extracted result is `nil`; configurations that depend on an empty string as an explicit upstream clear signal should account for this behavior difference. The `append` rule keeps its existing concatenation behavior.
 
 ### Built-in Attributes
 

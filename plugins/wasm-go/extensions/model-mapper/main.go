@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
 	"sort"
 	"strings"
 
@@ -12,6 +13,8 @@ import (
 	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+
+	"github.com/alibaba/higress/plugins/wasm-go/pkg/jsonbody"
 )
 
 const (
@@ -26,7 +29,6 @@ func init() {
 		wrapper.ParseConfig(parseConfig),
 		wrapper.ProcessRequestHeaders(onHttpRequestHeaders),
 		wrapper.ProcessRequestBody(onHttpRequestBody),
-		wrapper.WithRebuildAfterRequests[Config](1000),
 		wrapper.WithRebuildMaxMemBytes[Config](200*1024*1024),
 	)
 }
@@ -42,12 +44,18 @@ type Config struct {
 	prefixModelMapping []ModelMapping
 	defaultModel       string
 	enableOnPathSuffix []string
+	modelToHeader      string
 }
 
 func parseConfig(json gjson.Result, config *Config) error {
 	config.modelKey = json.Get("modelKey").String()
 	if config.modelKey == "" {
 		config.modelKey = "model"
+	}
+
+	config.modelToHeader = json.Get("modelToHeader").String()
+	if config.modelToHeader == "" {
+		config.modelToHeader = "x-higress-llm-model-final"
 	}
 
 	modelMapping := json.Get("modelMapping")
@@ -144,6 +152,8 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config Config) types.Action {
 		return types.ActionContinue
 	}
 
+	// Disable re-route since the plugin may modify some headers related to the chosen route.
+	ctx.DisableReroute()
 	// Prepare for body processing
 	proxywasm.RemoveHttpRequestHeader("content-length")
 	// 100MB buffer limit
@@ -160,6 +170,28 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config Config, body []byte) type
 	if !json.Valid(body) {
 		log.Error("invalid json body")
 		return types.ActionContinue
+	}
+
+	// Runs before the model is read for mapping and before the sjson rewrite
+	// below: gjson keeps the first occurrence of a duplicated member while sjson
+	// and the upstream parser keep the last, so the mapping would otherwise be
+	// resolved for one model and rewritten onto another. Once this passes, the
+	// member is unique and the rewrite is unambiguous. A modelKey holding a
+	// nested gjson path is never a top-level member name, so the count - which
+	// is scoped to the top level - reports nothing for it.
+	if duplicate, err := jsonbody.DuplicateTopLevelMember(body, config.modelKey); err != nil {
+		log.Debugf("skip duplicate %s member check: %v", config.modelKey, err)
+	} else if duplicate {
+		message := jsonbody.DuplicateMemberMessage(config.modelKey)
+		log.Warnf("rejecting request: %s", message)
+		_ = proxywasm.SendHttpResponseWithDetail(
+			http.StatusBadRequest,
+			"duplicate_model_member",
+			[][2]string{{"content-type", "text/plain"}},
+			[]byte(message),
+			-1,
+		)
+		return types.ActionPause
 	}
 
 	oldModel := gjson.GetBytes(body, config.modelKey).String()
@@ -182,6 +214,9 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config Config, body []byte) type
 		}
 	}
 
+	// update x-higress-llm-model-final header
+	proxywasm.ReplaceHttpRequestHeader(config.modelToHeader, newModel)
+	log.Debugf("set header %s: %s", config.modelToHeader, newModel)
 	if newModel != "" && newModel != oldModel {
 		newBody, err := sjson.SetBytes(body, config.modelKey, newModel)
 		if err != nil {
